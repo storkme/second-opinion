@@ -52,7 +52,10 @@ import requests
 from . import review as rv
 from .providers import DEFAULT_MODEL, pi_provider, write_models_json
 
-REPO = os.environ.get("GITHUB_REPO", "").strip()
+# GITHUB_REPOSITORY is auto-set in the Action container; the bare CLI / daemon sets
+# GITHUB_REPO. action.yml can't pass GITHUB_REPO (no `github` context in runs.env).
+REPO = (os.environ.get("GITHUB_REPO", "").strip()
+        or os.environ.get("GITHUB_REPOSITORY", "").strip())
 TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 PROVIDER = os.environ.get("PROVIDER", "").strip().lower() or "openrouter"
 PI_PROVIDER = pi_provider(PROVIDER)
@@ -372,7 +375,8 @@ def main() -> None:
                     help="seconds between sweeps in --watch mode (default 1800)")
     args = ap.parse_args()
 
-    _require("GITHUB_REPO")
+    if not REPO:
+        raise SystemExit("Missing required environment variable: GITHUB_REPO (or GITHUB_REPOSITORY)")
     _require("GITHUB_TOKEN")
     if PROVIDER == "openrouter" or MERGE_PROVIDER == "openrouter":
         _require("OPENROUTER_API_KEY")

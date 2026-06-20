@@ -66,7 +66,9 @@ runs:
   env:
     OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
     GITHUB_TOKEN: ${{ inputs.github-token }}
-    GITHUB_REPO: ${{ github.repository }}
+    # No GITHUB_REPO here: the `github` context is NOT available in an action's runs.env
+    # (only `inputs`/`env`/`runner`/`job`/`steps`/`strategy`/`matrix`). GitHub auto-provides
+    # GITHUB_REPOSITORY in the container, and run.py falls back to it.
     PR_NUMBER: ${{ inputs.pr-number }}
     MODEL: ${{ inputs.model }}
     K: ${{ inputs.k }}
