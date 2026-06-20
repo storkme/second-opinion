@@ -170,7 +170,7 @@ Carry-forward fixes (from #272's review):
 - [x] **#1** defensive merge-parse (`choices`/`message`/`content` guarded) — `_chat()` in `run.py`.
 - [x] **#2** upfront credential validation per provider (`OPENROUTER_API_KEY` / `LLAMA_SERVER_URL`) — `run.py` `main()`.
 - [x] **#3** `PI_REASONING` honored for both providers — `providers.py`.
-- [~] **#4** `models.json` is now `chmod 600` and `GITHUB_TOKEN`/`GH_TOKEN` are stripped from the pi subprocess; the residual `OPENROUTER_API_KEY` exposure is documented (README Security). **Deferred:** stripping `OPENROUTER_API_KEY` from the subprocess too — first verify pi reads the key from the file, not env (stripping would break every pass if it doesn't).
+- [x] **#4** Resolved as *documented exposure*, not by stripping. `models.json` is `chmod 600` and `GITHUB_TOKEN`/`GH_TOKEN` are stripped from the pi subprocess (only the parent's `gh`/`git` need them). The OpenRouter key is deliberately **left reachable**: pi must read it from `models.json` to authenticate, and the agent's `bash` tool runs as the same user in the same container, so it can read that file (and the env) regardless — env-stripping removes neither the on-disk copy nor a determined exfil path, while risking auth breakage. The real controls are a low-limit key, the trusted-author boundary, and `TOOLS=read` to drop the shell. (Documented in README Security + the `run_pass` comment; validated end-to-end on PR #2.)
 - [x] **#5** one `DEFAULT_MODEL` constant in `providers.py` (action.yml mirrors the literal as its input default — YAML can't import it).
 - [x] **#6** kept `tools: read,bash` (recall) as the default in both deliveries; the `read` hardening is documented (README Security). Revisit if the Action is ever pointed at less-trusted repos.
 
