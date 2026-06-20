@@ -1,7 +1,7 @@
 name: Second Opinion
 
-# Dogfood: review our own PRs with this very reviewer. Pinned to @main while we hold the
-# v1 tag (GitHub rebuilds the Docker action from main each run); switch to @v1 once tagged.
+# Dogfood: review our own PRs with this very reviewer, pinned to the released @v1.
+# (To test unreleased reviewer changes, temporarily point this at @main or a branch.)
 # Needs an OPENROUTER_API_KEY repo secret.
 on:
   pull_request:
@@ -24,7 +24,7 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      - uses: storkme/second-opinion@main
+      - uses: storkme/second-opinion@v1
         with:
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           guidance-file: .github/review-guidance.md
