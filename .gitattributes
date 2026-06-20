@@ -1,0 +1,7 @@
+# Normalize to LF in the repo and on checkout — this ships a Docker action and shell
+# entrypoints; CRLF in a `#!/bin/sh` script breaks it. Overrides per-user core.autocrlf.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
