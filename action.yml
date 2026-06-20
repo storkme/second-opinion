@@ -1,0 +1,80 @@
+name: "PR Second Opinion"
+description: "Independent, agentic, OpenRouter-backed second-opinion review on a PR."
+author: "storkme"
+branding:
+  icon: "eye"
+  color: "purple"
+
+inputs:
+  openrouter-api-key:
+    description: "OpenRouter API key (https://openrouter.ai/keys)."
+    required: true
+  github-token:
+    description: "Token with pull-requests:write. Default: the workflow token."
+    required: false
+    default: ${{ github.token }}
+  pr-number:
+    description: "PR number to review. Default: the PR from the triggering event."
+    required: false
+    default: ${{ github.event.pull_request.number }}
+  model:
+    description: "OpenRouter model id for the review passes."
+    required: false
+    default: "z-ai/glm-5.2"
+  k:
+    description: "Agentic passes to union. K=1 (default) skips the merge."
+    required: false
+    default: "1"
+  merge-model:
+    description: "OpenRouter model for the K>1 merge. Default: same as model."
+    required: false
+    default: ""
+  project:
+    description: "Project name used in the review prompt."
+    required: false
+    default: ${{ github.event.repository.name }}
+  guidance-file:
+    description: "Path (in the repo) to this project's review checklist / 'memory'."
+    required: false
+    default: ""
+  exclude-globs:
+    description: "Comma-separated globs to drop from the diff. Default: sensible set."
+    required: false
+    default: ""
+  max-diff-chars:
+    description: "Cap on the diff size sent to the model."
+    required: false
+    default: "60000"
+  pass-timeout-seconds:
+    description: "Per-pass timeout."
+    required: false
+    default: "900"
+  tools:
+    description: "Agent tool grant. 'read,bash' (default) greps for callers/tests; set
+      'read' to drop shell access on repos with untrusted PR authors. See README Security."
+    required: false
+    default: "read,bash"
+  reasoning:
+    description: "Whether the model is a reasoning model. Default true (the default
+      z-ai/glm-5.2 is). Set false for a non-reasoning model so pi omits reasoning params."
+    required: false
+    default: "true"
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  env:
+    OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+    GITHUB_TOKEN: ${{ inputs.github-token }}
+    GITHUB_REPO: ${{ github.repository }}
+    PR_NUMBER: ${{ inputs.pr-number }}
+    MODEL: ${{ inputs.model }}
+    K: ${{ inputs.k }}
+    MERGE_MODEL: ${{ inputs.merge-model }}
+    PROJECT: ${{ inputs.project }}
+    GUIDANCE_FILE: ${{ inputs.guidance-file }}
+    EXCLUDE_GLOBS: ${{ inputs.exclude-globs }}
+    MAX_DIFF_CHARS: ${{ inputs.max-diff-chars }}
+    PASS_TIMEOUT_S: ${{ inputs.pass-timeout-seconds }}
+    TOOLS: ${{ inputs.tools }}
+    PI_REASONING: ${{ inputs.reasoning }}

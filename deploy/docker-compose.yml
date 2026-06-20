@@ -1,0 +1,60 @@
+# Self-hosted second-opinion daemon (delivery 2): poll open PRs on an interval and post
+# advisory reviews. Free/offline with PROVIDER=local (a llama.cpp llama-server on the
+# host); or PROVIDER=openrouter for a paid hosted model without CI. The same Dockerfile
+# as the GitHub Action; only the entrypoint differs (it clones the target repo, then runs
+# `second_opinion.run --watch`).
+#
+#   cd deploy && cp .env.example .env && $EDITOR .env && docker compose up -d --build
+name: second-opinion
+
+services:
+  reviewer:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: second-opinion
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      GITHUB_REPO: ${GITHUB_REPO:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # Review provider: "local" (llama-server) or "openrouter".
+      PROVIDER: ${PROVIDER:-local}
+      LLAMA_SERVER_URL: ${LLAMA_SERVER_URL:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      MODEL: ${MODEL:-}
+      # K unset => provider-aware default (1 openrouter / 3 local). Merge backend
+      # defaults to PROVIDER, so PROVIDER=local is fully offline.
+      K: ${K:-}
+      MERGE_PROVIDER: ${MERGE_PROVIDER:-}
+      MERGE_MODEL: ${MERGE_MODEL:-}
+      PROJECT: ${PROJECT:-}
+      GUIDANCE_FILE: ${GUIDANCE_FILE:-}
+      EXCLUDE_GLOBS: ${EXCLUDE_GLOBS:-}
+      TOOLS: ${TOOLS:-read,bash}
+      PI_REASONING: ${PI_REASONING:-true}
+      INTERVAL: ${INTERVAL:-1800}
+      REPO_DIR: /repo
+    volumes:
+      # Persists the target-repo clone (worktree base) across restarts.
+      - repo:/repo
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ ! -d /repo/.git ]; then
+          echo "[daemon] cloning ${GITHUB_REPO} into /repo"
+          git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git" /repo
+        fi
+        git config --global --add safe.directory /repo || true
+        cd /repo
+        exec python3 -m second_opinion.run --watch --interval "${INTERVAL:-1800}"
+    # A llama-server on the WSL2 / host gateway is usually reachable from a bridged
+    # container. If NOT: point LLAMA_SERVER_URL at http://host.docker.internal:<port>
+    # and uncomment extra_hosts, or use network_mode: host (Linux host only).
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    # network_mode: "host"
+
+volumes:
+  repo:

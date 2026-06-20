@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+# daemon secrets — only .env.example is tracked
+deploy/.env
+.env

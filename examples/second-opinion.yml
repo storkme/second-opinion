@@ -1,0 +1,30 @@
+# Drop this into any repo at .github/workflows/second-opinion.yml
+# Add an OPENROUTER_API_KEY repo secret. That's the entire setup.
+name: Second Opinion
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:                       # one run per PR; a new push cancels the old
+  group: second-opinion-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Same-repo PRs only, so secrets are never exposed to a fork.
+    if: |
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: storkme/second-opinion@v1
+        with:
+          openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+          model: z-ai/glm-5.2
+          guidance-file: .github/review-guidance.md   # optional: this repo's checklist
