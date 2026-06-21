@@ -157,6 +157,23 @@ forks but not a compromised same-repo author; set `TOOLS=read` to drop shell at 
 cost; use a low-limit OpenRouter key. `run.py` strips `GITHUB_TOKEN`/`GH_TOKEN` from the pi
 subprocess as defense-in-depth (they're only needed by the `gh`/`git` calls in the parent).
 
+## Changelog & releases
+
+`CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com) + semver.
+
+- **Every PR with a user-facing change** (an action input/behavior, the
+  `second-opinion-bootstrap` CLI, the daemon) adds a bullet under `## [Unreleased]` in the
+  *same* PR — grouped Added / Changed / Fixed / Removed / Security. Skip pure-internal noise
+  (typos, test-only tweaks).
+- **Cutting a release:** rename `[Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`, bump `version`
+  in `pyproject.toml` to match, update the link refs at the bottom of the changelog, and
+  commit. Then tag `vX.Y.Z` (annotated) and **move the major `v1` tag to it**
+  (`git tag -fa v1 <sha> -m … && git push -f origin v1`), and publish a GitHub release with
+  that section's notes. Consumers pin `uses: storkme/second-opinion@v1`, so `v1` must always
+  point at the latest stable.
+- Keep three things in agreement: `pyproject.toml` `version`, the newest `CHANGELOG.md`
+  heading, and the latest tag.
+
 ## Status
 
 **Core port: done** (2026-06-20) — the repo is built and the unit suite passes (`pytest`,
