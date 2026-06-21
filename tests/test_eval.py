@@ -28,6 +28,7 @@ def test_score_recomputes_recall_fp_validextras():
     }
     card = ev._score(42, sc)
     assert card["recallSubstantive"] == round(1 / 3, 3)   # 1 high+med matched / (1 + 2 missed)
+    assert card["matchedSubstantive"] == 1                 # the high; the low match is excluded
     assert card["recallAll"] == round(2 / 4, 3)           # 2 matched / (2 + 2)
     assert card["falsePositives"] == 1
     assert card["validExtras"] == 1

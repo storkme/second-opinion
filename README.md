@@ -119,8 +119,9 @@ For each merged PR it reconstructs the diff *as the reviewer first saw it* (pre-
 reviewer on it, and judges its findings against the loop's actual review comments — reporting
 recall, false positives, and **validExtras** (real issues the loop missed — the decorrelation
 payoff). Runs from a local checkout (needs `git` + `pi`); ~$0.3–0.5/PR, so use a small set and
-`--dry-run` to scope first. A deeper, label-free *agentic time-travel audit* (forward-fix as
-ground truth) is the next tier, not built yet.
+`--dry-run` to scope first. For trustworthy FP/validExtras, judge with a *different* model
+(`--judge-model`) — a model grading its own output is self-favoring. A deeper, label-free
+*agentic time-travel audit* (forward-fix as ground truth) is the next tier, not built yet.
 
 ## How it works
 

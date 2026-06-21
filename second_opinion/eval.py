@@ -17,6 +17,10 @@ the truth set.
 Cost: ~1 agentic review pass + 1 judge call per PR (~$0.3-0.5 on glm-5.2). Use a small PR set;
 `--dry-run` reconstructs + lists ground truth with NO model spend.
 
+For trustworthy false-positive / validExtras calls, pass `--judge-model` a DIFFERENT (ideally
+stronger) model than the reviewer — a model judging its own output is self-favoring. Recall
+(matched vs the loop's fixed comments) is more robust to this; the extras assessment is not.
+
 Runs from a local checkout of the repo (REPO_DIR / cwd) — needs git for reconstruction +
 worktrees and `pi` for the agentic pass. Env: GITHUB_REPO, GITHUB_TOKEN, OPENROUTER_API_KEY,
 plus the reviewer's usual env (PROVIDER, MODEL, ...).
@@ -157,7 +161,8 @@ def _score(pr: int, sc: dict) -> dict:
         "pr": pr,
         "recallSubstantive": round(m_hm / denom_hm, 3) if denom_hm else None,
         "recallAll": round(len(matched) / denom_all, 3) if denom_all else None,
-        "matched": len(matched), "missed": len(missed), "substantiveGroundTruth": denom_hm,
+        "matched": len(matched), "matchedSubstantive": m_hm,
+        "missed": len(missed), "substantiveGroundTruth": denom_hm,
         "falsePositives": sum(1 for e in extra if e.get("assessment") == "false_positive"),
         "validExtras": sum(1 for e in extra if e.get("assessment") == "valid"),
         "missByCategory": cats,
@@ -259,7 +264,7 @@ def main() -> None:
             continue
         cards.append(card)
         log(f"#{pr}: recall(subst)={card['recallSubstantive']} "
-            f"({card['matched']}/{card['substantiveGroundTruth']} high+med) "
+            f"({card['matchedSubstantive']}/{card['substantiveGroundTruth']} high+med matched) "
             f"FP={card['falsePositives']} validExtras={card['validExtras']}")
         if card["missByCategory"]:
             log(f"     misses by lever: {card['missByCategory']}")
