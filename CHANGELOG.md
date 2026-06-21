@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-21
+
 ### Added
 - `second-opinion-bootstrap` CLI — generate a draft `review-guidance.md` from a repo's
   PR-review history. Mines the findings other reviewers already raised (inline comments +
@@ -30,5 +32,6 @@ All notable changes to this project are documented here. The format follows
   - Per-project guidance file (the reviewer's "memory"), HTML-marker idempotency (no database),
     and decorrelated, advisory-never-a-gate framing.
 
-[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/storkme/second-opinion/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/storkme/second-opinion/releases/tag/v1.0.0

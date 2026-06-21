@@ -1,6 +1,6 @@
 [project]
 name = "second-opinion"
-version = "1.0.0"
+version = "1.1.0"
 description = "Independent, agentic second-opinion PR reviewer (OpenRouter or a local llama-server)"
 requires-python = ">=3.11"
 dependencies = ["requests>=2.28"]
