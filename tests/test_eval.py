@@ -92,6 +92,33 @@ def test_slug_sanitizes_model_id_for_filenames():
     assert ev._slug("z-ai/glm-5.2") == "z-ai-glm-5.2"
 
 
+def test_judge_retries_once_on_empty_response():
+    rec = {"pr": 9, "title": "t", "groundTruth": [], "followups": []}
+    calls = {"n": 0}
+
+    def fake_chat(base, key, model, prompt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ""  # first attempt: the flaky empty body
+        return '```json\n{"matched":[{"severity":"high"}],"missed":[],"extra":[],"verdict":"ok"}\n```'
+
+    run._chat = fake_chat
+    card = ev.judge(rec, "some review", "judge/model")
+    assert calls["n"] == 2                       # it retried after the empty
+    assert card["pr"] == 9 and card["matchedSubstantive"] == 1
+
+
+def test_judge_raises_after_two_empty_responses():
+    rec = {"pr": 9, "title": "t", "groundTruth": [], "followups": []}
+    run._chat = lambda *a, **k: ""
+    try:
+        ev.judge(rec, "r", "m")
+    except RuntimeError as e:
+        assert "after retry" in str(e)
+    else:
+        raise AssertionError("expected RuntimeError after two empty judge responses")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

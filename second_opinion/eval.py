@@ -180,11 +180,16 @@ def judge(rec: dict, review_text: str, judge_model: str) -> dict:
               + "\n\n=== CANDIDATE (second-opinion's blind review) ===\n"
               + (review_text or "(empty — reviewer produced nothing)"))
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    text = run._chat(run.OPENROUTER_BASE, key, judge_model, prompt)
-    m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.S) or re.search(r"(\{.*\})", text, re.S)
-    if not m:
-        raise RuntimeError(f"judge ({judge_model}) returned no JSON scorecard: {text[:200]}")
-    return _score(rec["pr"], json.loads(m.group(1)))
+    # Judge models intermittently return an empty / non-JSON body (seen with
+    # gemini-pro-preview on large prompts) — retry once before giving up, so a transient
+    # blip doesn't silently drop the PR from the scorecard.
+    text = ""
+    for _attempt in range(2):
+        text = run._chat(run.OPENROUTER_BASE, key, judge_model, prompt)
+        m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.S) or re.search(r"(\{.*\})", text, re.S)
+        if m:
+            return _score(rec["pr"], json.loads(m.group(1)))
+    raise RuntimeError(f"judge ({judge_model}) returned no JSON scorecard after retry: {text[:200]}")
 
 
 def pick_auto(n: int, window: int = 40) -> list[int]:
