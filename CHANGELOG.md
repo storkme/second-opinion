@@ -13,6 +13,9 @@ All notable changes to this project are documented here. The format follows
   run the reviewer, and judge its findings against the loop's review comments — recall, false
   positives, and validExtras (what it caught that the loop missed). `--dry-run` reconstructs
   ground truth with no model spend. (#7)
+- `second-opinion-eval --judge-only` — re-grade the saved reviews from a previous run with a
+  different `--judge-model` (re-fetches ground truth, no new agentic passes), e.g. to re-judge
+  with an independent/stronger model since a model grading its own output is self-favoring. (#8)
 
 ## [1.1.0] - 2026-06-21
 

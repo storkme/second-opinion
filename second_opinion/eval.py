@@ -203,6 +203,28 @@ def pick_auto(n: int, window: int = 40) -> list[int]:
     return [num for _, num in scored[:n]]
 
 
+def _slug(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9.]+", "-", s).strip("-")
+
+
+def _aggregate(cards: list[dict], save_dir: Path | None, suffix: str = "") -> None:
+    if not cards:
+        raise SystemExit("No PRs scored.")
+    recalls = [c["recallSubstantive"] for c in cards if c["recallSubstantive"] is not None]
+    agg = {
+        "prs": [c["pr"] for c in cards],
+        "meanRecallSubstantive": round(statistics.mean(recalls), 3) if recalls else None,
+        "totalFalsePositives": sum(c["falsePositives"] for c in cards),
+        "totalValidExtras": sum(c["validExtras"] for c in cards),
+    }
+    log(f"AGGREGATE · {len(cards)} PR(s) · mean recall(subst)={agg['meanRecallSubstantive']} "
+        f"· FP total={agg['totalFalsePositives']} · validExtras total={agg['totalValidExtras']}")
+    if save_dir:
+        name = f"aggregate.{suffix}.json" if suffix else "aggregate.json"
+        (save_dir / name).write_text(json.dumps(agg, indent=2), encoding="utf-8")
+    print(json.dumps(agg, indent=2))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Eval second-opinion's recall against a real review loop")
     ap.add_argument("prs", nargs="*", type=int, help="PR number(s) to evaluate")
@@ -211,6 +233,9 @@ def main() -> None:
     ap.add_argument("--judge-model", default="", help=f"judge model (default = MODEL: {run.MODEL})")
     ap.add_argument("--dry-run", action="store_true",
                     help="reconstruct + list ground truth only — NO agentic pass, NO judge, no spend")
+    ap.add_argument("--judge-only", action="store_true",
+                    help="re-judge the saved reviews in --save-dir with --judge-model (re-fetches "
+                    "ground truth; NO agentic passes) — e.g. to re-grade with an independent judge")
     ap.add_argument("--save-dir", help="persist per-PR review text + scorecards + aggregate here")
     args = ap.parse_args()
 
@@ -239,12 +264,41 @@ def main() -> None:
                 f"{len(rec['diff'])} diff chars @ {rec['target'][:10]} — '{rec['title'][:50]}'")
         return
 
+    judge_model = args.judge_model.strip() or run.MODEL
+
+    if args.judge_only:
+        if not save_dir:
+            raise SystemExit("--judge-only needs --save-dir (where the {pr}.review.md live)")
+        if not os.environ.get("OPENROUTER_API_KEY", "").strip():
+            raise SystemExit("Missing required environment variable: OPENROUTER_API_KEY")
+        log(f"re-judge · {run.REPO} · judge={judge_model} · {len(prs)} PR(s) "
+            f"(saved reviews, no agentic passes)")
+        cards = []
+        for pr in prs:
+            rp = save_dir / f"{pr}.review.md"
+            if not rp.exists():
+                log(f"#{pr}: no saved review at {rp} — skipping")
+                continue
+            try:
+                rec = reconstruct(pr)
+                card = judge(rec, rp.read_text(encoding="utf-8"), judge_model)
+            except Exception as e:  # noqa: BLE001
+                log(f"#{pr}: ERROR {str(e)[:200]} — continuing")
+                continue
+            cards.append(card)
+            log(f"#{pr}: recall(subst)={card['recallSubstantive']} "
+                f"({card['matchedSubstantive']}/{card['substantiveGroundTruth']} high+med matched) "
+                f"FP={card['falsePositives']} validExtras={card['validExtras']}")
+            (save_dir / f"{pr}.scorecard.{_slug(judge_model)}.json").write_text(
+                json.dumps(card, indent=2, ensure_ascii=False), encoding="utf-8")
+        _aggregate(cards, save_dir, suffix=_slug(judge_model))
+        return
+
     # Real run: register the provider for the agentic pass, then review + judge each PR.
     model = run.resolve_model()
     if model is None:
         return
     write_models_json(model)
-    judge_model = args.judge_model.strip() or run.MODEL
     for name in ("OPENROUTER_API_KEY",):  # judge always uses OpenRouter
         if not os.environ.get(name, "").strip():
             raise SystemExit(f"Missing required environment variable: {name}")
@@ -273,20 +327,7 @@ def main() -> None:
             (save_dir / f"{pr}.scorecard.json").write_text(
                 json.dumps(card, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    if not cards:
-        raise SystemExit("No PRs scored.")
-    recalls = [c["recallSubstantive"] for c in cards if c["recallSubstantive"] is not None]
-    agg = {
-        "prs": [c["pr"] for c in cards],
-        "meanRecallSubstantive": round(statistics.mean(recalls), 3) if recalls else None,
-        "totalFalsePositives": sum(c["falsePositives"] for c in cards),
-        "totalValidExtras": sum(c["validExtras"] for c in cards),
-    }
-    log(f"AGGREGATE · {len(cards)} PR(s) · mean recall(subst)={agg['meanRecallSubstantive']} "
-        f"· FP total={agg['totalFalsePositives']} · validExtras total={agg['totalValidExtras']}")
-    if save_dir:
-        (save_dir / "aggregate.json").write_text(json.dumps(agg, indent=2), encoding="utf-8")
-    print(json.dumps(agg, indent=2))
+    _aggregate(cards, save_dir)
 
 
 if __name__ == "__main__":
