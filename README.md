@@ -83,6 +83,26 @@ classes, conventions, "check X whenever Y". It's injected as a second checklist 
 prompt. Keep it tight and curate it like `CLAUDE.md`; it's the one thing that makes the
 reviewer *yours*. Omit it and the reviewer still runs on general code-review judgement.
 
+## Bootstrapping the guidance file
+
+Don't hand-write the guidance from scratch — **mine it from the repo's own review history**:
+
+```bash
+GITHUB_TOKEN=… OPENROUTER_API_KEY=… \
+  second-opinion-bootstrap --repo owner/name --output .github/review-guidance.md
+```
+
+It fetches recent merged PRs, collects the findings other reviewers already raised on them
+(inline review comments + review summaries — `claude[bot]`, humans, …), and asks one strong
+model to distill the *recurring, repo-specific* bug classes and conventions into a draft.
+It deliberately **excludes second-opinion's own comments** (same decorrelation principle),
+so it learns from independent signal, not its own past output.
+
+The result is a **draft to curate**, not a finished file — prune and sharpen it like
+`CLAUDE.md` before pointing the reviewer at it. (Default prints to stdout; `--output`
+writes a file.) A repo with little review history won't have much to mine — that's the case
+a deeper agentic history-audit would cover, which isn't built yet.
+
 ## How it works
 
 ```

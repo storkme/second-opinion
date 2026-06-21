@@ -10,6 +10,7 @@ test = ["pytest>=7"]
 
 [project.scripts]
 second-opinion = "second_opinion.run:main"
+second-opinion-bootstrap = "second_opinion.bootstrap:main"
 
 [build-system]
 requires = ["setuptools>=68"]
