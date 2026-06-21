@@ -36,6 +36,18 @@ def test_pr_findings_parses_and_only_mines_pulls_endpoints():
     assert not any("/issues/" in e for e in endpoints)
 
 
+def test_sample_evenly_spans_full_range():
+    prs = [{"number": i} for i in range(100, 0, -1)]  # 100 PRs, newest-first (#100..#1)
+    s = b._sample_evenly(prs, 10)
+    nums = [p["number"] for p in s]
+    assert nums[0] == 100 and nums[-1] == 1            # both ends — newest AND oldest
+    assert len(s) <= 10
+    assert nums == sorted(nums, reverse=True)          # newest-first order preserved
+    assert b._sample_evenly(prs, 500) == prs           # k >= n -> all
+    assert len(b._sample_evenly(prs, 1)) == 1          # k == 1 -> most recent only
+    assert b._sample_evenly(prs, 0) == []              # k <= 0 -> none (hybrid's "rest" tail)
+
+
 def test_pr_findings_survives_gh_errors():
     def boom(args, timeout_s=120):
         raise RuntimeError("gh api: 404")
@@ -57,6 +69,14 @@ def test_build_corpus_formats_caps_and_counts_included_only():
     assert b.build_corpus(items, max_chars=1) == ("", 0, 0)
 
 
+def test_build_corpus_caps_findings_per_pr():
+    many = [{"author": "r", "path": "f.py", "body": f"finding {i}"} for i in range(20)]
+    corpus, n_prs, n_findings = b.build_corpus([(1, "Hot PR", many)], max_chars=100000, max_per_pr=5)
+    assert n_findings == 5                                              # only 5 included
+    assert sum(1 for ln in corpus.splitlines() if ln.startswith("- [")) == 5
+    assert "+15 more findings on this PR" in corpus                     # richness still noted
+
+
 def test_synthesize_appends_corpus_raw_and_tolerates_braces():
     seen = {}
     b._chat = lambda base, key, model, prompt: seen.update(prompt=prompt) or "## g\n- X"
@@ -75,6 +95,17 @@ def test_synthesize_raises_clean_on_empty():
         assert "no usable content" in str(e)
     else:
         raise AssertionError("expected RuntimeError on empty synthesis")
+
+
+def test_synthesize_writes_artifacts_to_save_dir():
+    import pathlib
+    import tempfile
+    b._chat = lambda *a, **k: "## guidance\n- check X"
+    d = pathlib.Path(tempfile.mkdtemp())
+    b.synthesize("THE CORPUS", "proj", "m", 2, 3, save_dir=d)
+    assert (d / "corpus.txt").read_text() == "THE CORPUS"
+    assert (d / "prompt.txt").read_text().endswith("THE CORPUS")
+    assert (d / "response.md").read_text() == "## guidance\n- check X"
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Bootstrap a draft review-guidance.md from a repo's PR-review history.
 
-Thin and project-agnostic: fetch merged PRs, pull the review findings other reviewers
+Thin and project-agnostic: take the most-recent merged PRs densely PLUS a sample spread
+across the older history (recent-dense catches current bug clusters; the historical sample
+surfaces older classes — neither alone gets both), pull the review findings other reviewers
 already raised on them (inline review comments + review summaries — claude[bot], humans,
 etc.), and synthesize the recurring, repo-specific bug classes into a draft guidance file
 via ONE strong-model call. No agentic per-PR audit — that's the (deferred) high-fidelity
@@ -84,6 +86,21 @@ def merged_prs(repo: str, limit: int) -> list[dict]:
     return json.loads(out)
 
 
+def _sample_evenly(prs: list[dict], k: int) -> list[dict]:
+    """Pick k PRs spread evenly across the list (gh returns newest-first), including both
+    ends — so the corpus spans the repo's history instead of clustering on the newest PRs.
+    Returns all of them when k >= len(prs). Order (newest-first) is preserved."""
+    n = len(prs)
+    if k <= 0:
+        return []
+    if k >= n:
+        return prs
+    if k == 1:
+        return [prs[0]]
+    idxs = sorted({round(i * (n - 1) / (k - 1)) for i in range(k)})
+    return [prs[i] for i in idxs]
+
+
 def pr_findings(repo: str, n: int) -> list[dict]:
     """A PR's line-level review findings: inline review comments + non-empty review
     summaries. Both are *pulls* endpoints — second-opinion posts to *issues*, so its own
@@ -110,42 +127,53 @@ def pr_findings(repo: str, n: int) -> list[dict]:
     return findings
 
 
-def build_corpus(items: list[tuple], max_chars: int,
-                 max_finding_chars: int = 600) -> tuple[str, int, int]:
+def build_corpus(items: list[tuple], max_chars: int, max_finding_chars: int = 600,
+                 max_per_pr: int = 8) -> tuple[str, int, int]:
     """items: [(pr_number, title, [findings])]. Whole-PR blocks, capped at max_chars.
-    Returns (corpus, n_prs, n_findings) for the blocks ACTUALLY included, so the caller
-    reports accurate counts to the model. An oversized block is skipped (not a hard stop),
-    so one huge PR early in the list doesn't discard every later one."""
+    At most max_per_pr findings per PR — a few "hot" PRs with 20+ findings would otherwise
+    eat the char budget and crowd out the rest, and guidance wants breadth of PRs over depth
+    on one. Returns (corpus, n_prs, n_findings) for what's ACTUALLY included, so the caller
+    reports accurate counts. Oversized blocks are skipped (not a hard stop), so one big PR
+    early in the list doesn't discard every later one."""
     blocks: list[str] = []
     total = n_prs = n_findings = 0
     for n, title, findings in items:
         if not findings:
             continue
+        kept = findings[:max_per_pr]
         lines = [f"=== PR #{n}: {title} ==="]
-        for f in findings:
+        for f in kept:
             loc = f"{f['path']}: " if f.get("path") else ""
             body = " ".join(f["body"].split())[:max_finding_chars]
             lines.append(f"- [{f.get('author') or '?'}] {loc}{body}")
+        if len(findings) > max_per_pr:
+            lines.append(f"- (+{len(findings) - max_per_pr} more findings on this PR)")
         block = "\n".join(lines)
         if total + len(block) > max_chars:
             continue
         blocks.append(block)
         total += len(block)
         n_prs += 1
-        n_findings += len(findings)
+        n_findings += len(kept)
     return "\n\n".join(blocks), n_prs, n_findings
 
 
-def synthesize(corpus: str, project: str, model: str, n_prs: int, n_findings: int) -> str:
+def synthesize(corpus: str, project: str, model: str, n_prs: int, n_findings: int,
+               save_dir: Path | None = None) -> str:
     base = (os.environ.get("OPENROUTER_BASE_URL", "").strip().rstrip("/")
             or "https://openrouter.ai/api")
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not key:
         raise SystemExit("OPENROUTER_API_KEY is required")
     prompt = SYNTHESIS_PROMPT.format(project=project, n_prs=n_prs, n_findings=n_findings) + corpus
+    if save_dir:  # persist the exact synthesis input for analysis / prompt iteration
+        (save_dir / "corpus.txt").write_text(corpus, encoding="utf-8")
+        (save_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     out = _chat(base, key, model, prompt)
     if not out:
         raise RuntimeError(f"synthesis ({model}) returned no usable content")
+    if save_dir:
+        (save_dir / "response.md").write_text(out, encoding="utf-8")
     return out
 
 
@@ -154,11 +182,23 @@ def main() -> None:
         description="Bootstrap a draft review-guidance.md from a repo's PR-review history")
     ap.add_argument("--repo", help="owner/name (default: $GITHUB_REPO)")
     ap.add_argument("--limit", type=int, default=50,
-                    help="most-recent merged PRs to mine (default 50)")
+                    help="merged PRs to mine, sampled evenly across --window (default 50)")
+    ap.add_argument("--window", type=int, default=300,
+                    help="pool of recent merged PRs to draw from (default 300)")
+    ap.add_argument("--recent", type=int, default=20,
+                    help="of --limit, how many to take from the most-recent PRs densely; the "
+                    "rest are sampled across the older window (default 20)")
     ap.add_argument("--model", default="", help=f"synthesis model (default {DEFAULT_MODEL})")
     ap.add_argument("--max-chars", type=int, default=60000,
                     help="cap on the findings corpus sent to the model (default 60000)")
+    ap.add_argument("--max-findings-per-pr", type=int, default=8,
+                    help="cap findings included per PR (default 8) — favors breadth of PRs "
+                    "over depth on one hot PR")
     ap.add_argument("--output", help="write the draft here (default: stdout)")
+    ap.add_argument("--save-dir", help="persist the findings cache + synthesis prompt/response "
+                    "here (for analysis, prompt iteration, and free re-runs)")
+    ap.add_argument("--refresh", action="store_true",
+                    help="re-fetch from GitHub even when --save-dir has a cached findings.json")
     args = ap.parse_args()
 
     repo = (args.repo or os.environ.get("GITHUB_REPO", "")).strip()
@@ -166,25 +206,45 @@ def main() -> None:
         raise SystemExit("Missing repo: pass --repo owner/name or set GITHUB_REPO")
     model = args.model.strip() or DEFAULT_MODEL
 
-    log(f"fetching up to {args.limit} merged PRs from {repo}")
-    items: list[tuple] = []
-    for pr in merged_prs(repo, args.limit):
-        f = pr_findings(repo, pr["number"])
-        if f:
-            items.append((pr["number"], pr["title"], f))
-            log(f"#{pr['number']}: {len(f)} finding(s)")
+    save_dir = Path(args.save_dir) if args.save_dir else None
+    if save_dir:
+        save_dir.mkdir(parents=True, exist_ok=True)
+    cache = (save_dir / "findings.json") if save_dir else None
+
+    if cache and cache.exists() and not args.refresh:
+        items = [(r["number"], r["title"], r["findings"])
+                 for r in json.loads(cache.read_text(encoding="utf-8"))]
+        log(f"loaded {len(items)} PR(s) with findings from {cache} (use --refresh to re-fetch)")
+    else:
+        pool = merged_prs(repo, args.window)
+        recent = pool[:min(args.recent, args.limit)]
+        sampled_rest = _sample_evenly(pool[len(recent):], args.limit - len(recent))
+        selected = recent + sampled_rest
+        log(f"mining {len(selected)} of {len(pool)} merged PRs "
+            f"({len(recent)} most-recent + {len(sampled_rest)} sampled across older history)")
+        items = []
+        for pr in selected:
+            f = pr_findings(repo, pr["number"])
+            if f:
+                items.append((pr["number"], pr["title"], f))
+                log(f"#{pr['number']}: {len(f)} finding(s)")
+        if cache:
+            cache.write_text(json.dumps(
+                [{"number": n, "title": t, "findings": f} for n, t, f in items], indent=2),
+                encoding="utf-8")
     if not items:
         raise SystemExit(
-            f"No review findings mined from {repo}'s last {args.limit} merged PRs. This thin "
-            "bootstrap mines EXISTING review history; a repo without one needs the agentic "
-            "time-travel audit (not yet implemented).")
+            f"No review findings in the {args.limit} PR(s) sampled from {repo}'s {args.window} "
+            "most-recent merged PRs. This thin bootstrap mines EXISTING review history; a repo "
+            "without one needs the agentic time-travel audit (not yet implemented).")
 
-    corpus, n_prs, n_findings = build_corpus(items, args.max_chars)
+    corpus, n_prs, n_findings = build_corpus(items, args.max_chars,
+                                             max_per_pr=args.max_findings_per_pr)
     if not corpus:
         raise SystemExit(
             f"All {len(items)} PR(s) with findings exceed --max-chars={args.max_chars}; raise it.")
     log(f"synthesizing from {n_prs} PR(s) / {n_findings} finding(s) via {model}")
-    draft = synthesize(corpus, repo.split("/")[-1], model, n_prs, n_findings)
+    draft = synthesize(corpus, repo.split("/")[-1], model, n_prs, n_findings, save_dir)
 
     if args.output:
         out = Path(args.output)

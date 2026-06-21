@@ -92,9 +92,10 @@ GITHUB_TOKEN=… OPENROUTER_API_KEY=… \
   second-opinion-bootstrap --repo owner/name --output .github/review-guidance.md
 ```
 
-It fetches recent merged PRs, collects the findings other reviewers already raised on them
-(inline review comments + review summaries — `claude[bot]`, humans, …), and asks one strong
-model to distill the *recurring, repo-specific* bug classes and conventions into a draft.
+It samples merged PRs across the repo's history (`--window`/`--limit`, so older bug classes
+aren't buried under recent work), collects the findings other reviewers already raised on
+them (inline review comments + review summaries — `claude[bot]`, humans, …), and asks one
+strong model to distill the *recurring, repo-specific* bug classes and conventions into a draft.
 Decorrelation is structural: it mines line-level reviewer findings (the *pulls* API), **not
 the PR conversation stream where second-opinion posts its advisory** (the *issues* API) — so
 the reviewer's own output never enters the corpus it learns from.
