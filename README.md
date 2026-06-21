@@ -105,6 +105,23 @@ The result is a **draft to curate**, not a finished file — prune and sharpen i
 writes a file.) A repo with little review history won't have much to mine — that's the case
 a deeper agentic history-audit would cover, which isn't built yet.
 
+## Measuring recall (eval)
+
+How do you know the second opinion is worth the extra comment? Measure it:
+
+```bash
+GITHUB_REPO=owner/name GITHUB_TOKEN=… OPENROUTER_API_KEY=… \
+  second-opinion-eval 200 190 --dry-run   # reconstruct + ground truth, no model spend
+second-opinion-eval --auto 5              # the 5 most-reviewed recent merged PRs
+```
+
+For each merged PR it reconstructs the diff *as the reviewer first saw it* (pre-fix), runs the
+reviewer on it, and judges its findings against the loop's actual review comments — reporting
+recall, false positives, and **validExtras** (real issues the loop missed — the decorrelation
+payoff). Runs from a local checkout (needs `git` + `pi`); ~$0.3–0.5/PR, so use a small set and
+`--dry-run` to scope first. A deeper, label-free *agentic time-travel audit* (forward-fix as
+ground truth) is the next tier, not built yet.
+
 ## How it works
 
 ```

@@ -73,6 +73,9 @@ second_opinion/
                    # (one strong-model synthesis call; reuses run._chat + DEFAULT_MODEL). Mines
                    # the pulls API (reviewer findings), not the issues stream it posts to —
                    # structural decorrelation. CLI: main().
+  eval.py          # OFFLINE tool: measure the reviewer's recall vs a real review loop —
+                   # reconstruct a PR's pre-fix diff, run the reviewer, judge findings vs the
+                   # loop's comments (recall / FP / validExtras). Reuses run_pass + _chat. CLI: main().
 action.yml         # delivery 1: GitHub Action manifest (inputs → env).
 Dockerfile         # Action image: node22 + python3 + gh + pi. claude NOT installed.
 entrypoint.sh      # Action entrypoint: requires PR_NUMBER, runs `run.py --pr N` once.
@@ -84,7 +87,8 @@ tests/
   test_review.py   # diff filtering / prompt construction.
   test_run.py      # merge-response parsing + marker dedup query (subprocess/requests stubbed).
   test_bootstrap.py # guidance mining: corpus build, decorrelation filter, brace-safe synth.
-pyproject.toml     # package "second-opinion"; scripts `second-opinion` + `second-opinion-bootstrap`; py>=3.11.
+  test_eval.py     # eval scoring recompute + diff reconstruction / ground-truth filtering.
+pyproject.toml     # package "second-opinion"; scripts second-opinion{,-bootstrap,-eval}; py>=3.11.
 README.md          # user-facing setup/usage.
 CLAUDE.md          # this file.
 ```

@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `second-opinion-eval` CLI — measure the reviewer's recall against a real review loop:
+  reconstruct a merged PR's pre-fix diff (the commit the loop's reviewer commented on most),
+  run the reviewer, and judge its findings against the loop's review comments — recall, false
+  positives, and validExtras (what it caught that the loop missed). `--dry-run` reconstructs
+  ground truth with no model spend. (#7)
+
 ## [1.1.0] - 2026-06-21
 
 ### Added
