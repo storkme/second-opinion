@@ -95,8 +95,9 @@ GITHUB_TOKEN=… OPENROUTER_API_KEY=… \
 It fetches recent merged PRs, collects the findings other reviewers already raised on them
 (inline review comments + review summaries — `claude[bot]`, humans, …), and asks one strong
 model to distill the *recurring, repo-specific* bug classes and conventions into a draft.
-It deliberately **excludes second-opinion's own comments** (same decorrelation principle),
-so it learns from independent signal, not its own past output.
+Decorrelation is structural: it mines line-level reviewer findings (the *pulls* API), **not
+the PR conversation stream where second-opinion posts its advisory** (the *issues* API) — so
+the reviewer's own output never enters the corpus it learns from.
 
 The result is a **draft to curate**, not a finished file — prune and sharpen it like
 `CLAUDE.md` before pointing the reviewer at it. (Default prints to stdout; `--output`

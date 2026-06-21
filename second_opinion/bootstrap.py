@@ -10,8 +10,10 @@ upgrade; this mines the review history you already have.
 The output is a DRAFT to curate like CLAUDE.md, not a finished artifact — it's printed to
 stdout by default (or written with --output), never wired in automatically.
 
-Decorrelation: second-opinion's OWN comments are excluded from the corpus, so the guidance
-is mined from independent signal, not the reviewer's own past output.
+Decorrelation is structural: we mine line-level reviewer findings from the *pulls* API
+(inline review comments + formal review summaries), NOT the PR conversation stream (the
+*issues* comments endpoint) where second-opinion posts its own advisory — so the reviewer's
+own output can't enter the corpus it learns from.
 
 Env: GITHUB_TOKEN (or GH_TOKEN), OPENROUTER_API_KEY, OPENROUTER_BASE_URL (optional).
 Usage: second-opinion-bootstrap --repo owner/name [--limit 50] [--model ID] [--output FILE]
@@ -27,10 +29,6 @@ from pathlib import Path
 
 from .providers import DEFAULT_MODEL
 from .run import _chat  # reuse the defensive OpenRouter chat helper
-
-# Exclude our own advisory comments from the mined corpus (decorrelation): don't let the
-# reviewer bootstrap guidance from its own past output. Matches the marker run.py posts.
-OWN_MARKER = "<!-- second-opinion"
 
 # Scalar fields are .format()-ed in; the findings corpus is APPENDED raw afterwards so
 # braces in review bodies (code snippets!) can't break string formatting.
@@ -87,7 +85,9 @@ def merged_prs(repo: str, limit: int) -> list[dict]:
 
 
 def pr_findings(repo: str, n: int) -> list[dict]:
-    """A PR's inline review comments + non-empty review summaries, minus our own comments."""
+    """A PR's line-level review findings: inline review comments + non-empty review
+    summaries. Both are *pulls* endpoints — second-opinion posts to *issues*, so its own
+    advisory is never read here (structural decorrelation; see module docstring)."""
     findings: list[dict] = []
     try:
         inline = _ndjson(_gh(["api", f"repos/{repo}/pulls/{n}/comments", "--paginate",
@@ -96,7 +96,7 @@ def pr_findings(repo: str, n: int) -> list[dict]:
         inline = []
     for c in inline:
         body = (c.get("body") or "").strip()
-        if body and OWN_MARKER not in body:
+        if body:
             findings.append({"author": c.get("author"), "path": c.get("path"), "body": body})
     try:
         reviews = _ndjson(_gh(["api", f"repos/{repo}/pulls/{n}/reviews", "--paginate",
@@ -105,15 +105,19 @@ def pr_findings(repo: str, n: int) -> list[dict]:
         reviews = []
     for r in reviews:
         body = (r.get("body") or "").strip()
-        if body and OWN_MARKER not in body:
+        if body:
             findings.append({"author": r.get("author"), "path": None, "body": body})
     return findings
 
 
-def build_corpus(items: list[tuple], max_chars: int, max_finding_chars: int = 600) -> str:
-    """items: [(pr_number, title, [findings])]. Whole-PR blocks, capped at max_chars."""
+def build_corpus(items: list[tuple], max_chars: int,
+                 max_finding_chars: int = 600) -> tuple[str, int, int]:
+    """items: [(pr_number, title, [findings])]. Whole-PR blocks, capped at max_chars.
+    Returns (corpus, n_prs, n_findings) for the blocks ACTUALLY included, so the caller
+    reports accurate counts to the model. An oversized block is skipped (not a hard stop),
+    so one huge PR early in the list doesn't discard every later one."""
     blocks: list[str] = []
-    total = 0
+    total = n_prs = n_findings = 0
     for n, title, findings in items:
         if not findings:
             continue
@@ -124,10 +128,12 @@ def build_corpus(items: list[tuple], max_chars: int, max_finding_chars: int = 60
             lines.append(f"- [{f.get('author') or '?'}] {loc}{body}")
         block = "\n".join(lines)
         if total + len(block) > max_chars:
-            break
+            continue
         blocks.append(block)
         total += len(block)
-    return "\n\n".join(blocks)
+        n_prs += 1
+        n_findings += len(findings)
+    return "\n\n".join(blocks), n_prs, n_findings
 
 
 def synthesize(corpus: str, project: str, model: str, n_prs: int, n_findings: int) -> str:
@@ -162,12 +168,10 @@ def main() -> None:
 
     log(f"fetching up to {args.limit} merged PRs from {repo}")
     items: list[tuple] = []
-    n_findings = 0
     for pr in merged_prs(repo, args.limit):
         f = pr_findings(repo, pr["number"])
         if f:
             items.append((pr["number"], pr["title"], f))
-            n_findings += len(f)
             log(f"#{pr['number']}: {len(f)} finding(s)")
     if not items:
         raise SystemExit(
@@ -175,13 +179,18 @@ def main() -> None:
             "bootstrap mines EXISTING review history; a repo without one needs the agentic "
             "time-travel audit (not yet implemented).")
 
-    corpus = build_corpus(items, args.max_chars)
-    log(f"synthesizing from {len(items)} PR(s) / {n_findings} finding(s) via {model}")
-    draft = synthesize(corpus, repo.split("/")[-1], model, len(items), n_findings)
+    corpus, n_prs, n_findings = build_corpus(items, args.max_chars)
+    if not corpus:
+        raise SystemExit(
+            f"All {len(items)} PR(s) with findings exceed --max-chars={args.max_chars}; raise it.")
+    log(f"synthesizing from {n_prs} PR(s) / {n_findings} finding(s) via {model}")
+    draft = synthesize(corpus, repo.split("/")[-1], model, n_prs, n_findings)
 
     if args.output:
-        Path(args.output).write_text(draft.rstrip() + "\n", encoding="utf-8")
-        log(f"wrote draft -> {args.output} — curate it like CLAUDE.md before pointing the reviewer at it")
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(draft.rstrip() + "\n", encoding="utf-8")
+        log(f"wrote draft -> {out} — curate it like CLAUDE.md before pointing the reviewer at it")
     else:
         print(draft)
 

@@ -70,8 +70,9 @@ second_opinion/
   run.py           # orchestration + CLI: review one PR / sweep all / --watch daemon loop.
                    # merge_reviews() dispatches openrouter|local. Entry point: main().
   bootstrap.py     # OFFLINE tool: mine a repo's PR-review history → draft a review-guidance.md
-                   # (one strong-model synthesis call; reuses run._chat + DEFAULT_MODEL).
-                   # Excludes second-opinion's own comments (decorrelation). CLI: main().
+                   # (one strong-model synthesis call; reuses run._chat + DEFAULT_MODEL). Mines
+                   # the pulls API (reviewer findings), not the issues stream it posts to —
+                   # structural decorrelation. CLI: main().
 action.yml         # delivery 1: GitHub Action manifest (inputs → env).
 Dockerfile         # Action image: node22 + python3 + gh + pi. claude NOT installed.
 entrypoint.sh      # Action entrypoint: requires PR_NUMBER, runs `run.py --pr N` once.
