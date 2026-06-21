@@ -122,25 +122,40 @@ def reconstruct(pr: int) -> dict:
 
 
 def review_diff(rec: dict, model: str) -> str:
-    """Run second-opinion's agentic reviewer on the reconstructed diff, in a worktree at the
-    reviewed commit. Returns the review text (never posted)."""
+    """Run second-opinion's agentic reviewer (K passes, unioned when run.K>1 — same as
+    production) on the reconstructed diff, in a worktree at the reviewed commit. So the eval
+    measures the reviewer AS CONFIGURED (model, K, provider). Returns the review text."""
     filtered, _files, _trunc = rv.filter_diff(rec["diff"], run._exclude_globs(), run.MAX_DIFF_CHARS)
     if not filtered.strip():
         return ""
     system = rv.system_prompt(run.PROJECT, run._guidance())
-    user = (f"PR #{rec['pr']}: {rec['title']}\n\nThe full repository is checked out in your "
-            f"working directory at the reviewed commit. Use your tools (read, grep via bash) to "
-            f"inspect callers, tests, and definitions. The change to review is this diff:\n\n"
-            f"{filtered}\n")
+
+    def user_turn(diff_text: str) -> str:
+        return (f"PR #{rec['pr']}: {rec['title']}\n\nThe full repository is checked out in your "
+                f"working directory at the reviewed commit. Use your tools (read, grep via bash) "
+                f"to inspect callers, tests, and definitions. The change to review is this diff:"
+                f"\n\n{diff_text}\n")
+
     wt = os.path.join(tempfile.gettempdir(), f"second-opinion-eval-pr{rec['pr']}")
     run._git(["worktree", "remove", "--force", wt], check=False)
     add = run._git(["worktree", "add", "--detach", "--force", wt, rec["target"]], check=False)
     if add.returncode != 0:
         raise RuntimeError(f"worktree add @ {rec['target'][:10]}: {add.stderr.strip()[:120]}")
+    passes: list[str] = []
     try:
-        return run.run_pass(wt, model, system, user)
+        for i in range(run.K):
+            diff_use = filtered if i == 0 else rv.shuffle_inputs(filtered, i)
+            text = run.run_pass(wt, model, system, user_turn(diff_use))
+            if text:
+                passes.append(text)
     finally:
         run._git(["worktree", "remove", "--force", wt], check=False)
+    if not passes:
+        return ""
+    if len(passes) == 1:
+        return passes[0]
+    log(f"#{rec['pr']}: union of {len(passes)}/{run.K} passes")
+    return run.merge_reviews(rec["pr"], rec["title"], passes, run._merge_model_for(model))
 
 
 def _hm(items: list[dict]) -> int:
@@ -180,11 +195,16 @@ def judge(rec: dict, review_text: str, judge_model: str) -> dict:
               + "\n\n=== CANDIDATE (second-opinion's blind review) ===\n"
               + (review_text or "(empty — reviewer produced nothing)"))
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    text = run._chat(run.OPENROUTER_BASE, key, judge_model, prompt)
-    m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.S) or re.search(r"(\{.*\})", text, re.S)
-    if not m:
-        raise RuntimeError(f"judge ({judge_model}) returned no JSON scorecard: {text[:200]}")
-    return _score(rec["pr"], json.loads(m.group(1)))
+    # Judge models intermittently return an empty / non-JSON body (seen with
+    # gemini-pro-preview on large prompts) — retry once before giving up, so a transient
+    # blip doesn't silently drop the PR from the scorecard.
+    text = ""
+    for _attempt in range(2):
+        text = run._chat(run.OPENROUTER_BASE, key, judge_model, prompt)
+        m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.S) or re.search(r"(\{.*\})", text, re.S)
+        if m:
+            return _score(rec["pr"], json.loads(m.group(1)))
+    raise RuntimeError(f"judge ({judge_model}) returned no JSON scorecard after retry: {text[:200]}")
 
 
 def pick_auto(n: int, window: int = 40) -> list[int]:
@@ -303,7 +323,7 @@ def main() -> None:
         if not os.environ.get(name, "").strip():
             raise SystemExit(f"Missing required environment variable: {name}")
 
-    log(f"eval · {run.REPO} · reviewer={model} · judge={judge_model} · {len(prs)} PR(s)")
+    log(f"eval · {run.REPO} · reviewer={model} (K={run.K}) · judge={judge_model} · {len(prs)} PR(s)")
     cards: list[dict] = []
     for pr in prs:
         try:
