@@ -87,6 +87,11 @@ def test_reconstruct_filters_ground_truth_to_target_and_followups():
     assert rec["followups"] == ["address review"]          # only commits AFTER the target
 
 
+def test_slug_sanitizes_model_id_for_filenames():
+    assert ev._slug("anthropic/claude-sonnet-4.5") == "anthropic-claude-sonnet-4.5"
+    assert ev._slug("z-ai/glm-5.2") == "z-ai-glm-5.2"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
