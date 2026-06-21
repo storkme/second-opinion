@@ -43,12 +43,16 @@ def test_score_handles_empty_scorecard():
 
 
 def test_target_commit_picks_most_commented():
+    orig = run._gh
     run._gh = lambda args, timeout_s=60: json.dumps([
         {"commit_id": "aaa", "path": "f", "line": 1, "body": "x"},
         {"commit_id": "bbb", "path": "g", "line": 2, "body": "y"},
         {"commit_id": "bbb", "path": "h", "line": 3, "body": "z"},
     ])
-    target, comments = ev.target_commit(7)
+    try:
+        target, comments = ev.target_commit(7)
+    finally:
+        run._gh = orig
     assert target == "bbb" and len(comments) == 3
 
 
@@ -77,8 +81,12 @@ def test_reconstruct_filters_ground_truth_to_target_and_followups():
             return _CP(stdout="DIFFCONTENT")
         return _CP()  # fetch / worktree
 
+    orig_gh, orig_git = run._gh, run._git
     run._gh, run._git = fake_gh, fake_git
-    rec = ev.reconstruct(5)
+    try:
+        rec = ev.reconstruct(5)
+    finally:
+        run._gh, run._git = orig_gh, orig_git
     assert rec["target"] == "T"
     assert rec["base"] == "basesha" and rec["diff"] == "DIFFCONTENT"
     bodies = [f["body"] for f in rec["groundTruth"]]
@@ -102,21 +110,27 @@ def test_judge_retries_once_on_empty_response():
             return ""  # first attempt: the flaky empty body
         return '```json\n{"matched":[{"severity":"high"}],"missed":[],"extra":[],"verdict":"ok"}\n```'
 
+    orig = run._chat
     run._chat = fake_chat
-    card = ev.judge(rec, "some review", "judge/model")
+    try:
+        card = ev.judge(rec, "some review", "judge/model")
+    finally:
+        run._chat = orig
     assert calls["n"] == 2                       # it retried after the empty
     assert card["pr"] == 9 and card["matchedSubstantive"] == 1
 
 
 def test_judge_raises_after_two_empty_responses():
     rec = {"pr": 9, "title": "t", "groundTruth": [], "followups": []}
+    orig = run._chat
     run._chat = lambda *a, **k: ""
     try:
         ev.judge(rec, "r", "m")
+        raise AssertionError("expected RuntimeError after two empty judge responses")
     except RuntimeError as e:
         assert "after retry" in str(e)
-    else:
-        raise AssertionError("expected RuntimeError after two empty judge responses")
+    finally:
+        run._chat = orig
 
 
 if __name__ == "__main__":
