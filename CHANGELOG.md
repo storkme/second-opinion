@@ -5,14 +5,14 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
-## [Unreleased]
+## [1.2.0] - 2026-07-04
 
 ### Fixed
 - A **degraded** review pass — one that times out, exits non-zero (e.g. a `402` out-of-credits),
   exits cleanly with *no* review output, or can't check out the PR's head commit — now emits a
   GitHub Actions annotation at the point of failure (`::warning` / `::error`, the latter carrying
-  the subprocess's own message so a `402`
-  surfaces the *why*) and, when the PR gets no posted review, fails the check (exit 2) instead of
+  the subprocess's own message so a `402` surfaces the *why*) and, when the PR gets no posted
+  review, fails the check (exit 2) instead of
   exiting silently green. It gates on reviewer *malfunction*, never on review *findings*: a posted
   review always exits `0`, and a `K>1` run where one pass succeeds posts and passes (its degraded
   sibling downgrades to an annotation only). New `fail-on-degraded` input (`FAIL_ON_DEGRADED` env),
@@ -54,6 +54,7 @@ All notable changes to this project are documented here. The format follows
   - Per-project guidance file (the reviewer's "memory"), HTML-marker idempotency (no database),
     and decorrelated, advisory-never-a-gate framing.
 
-[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/storkme/second-opinion/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/storkme/second-opinion/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/storkme/second-opinion/releases/tag/v1.0.0
