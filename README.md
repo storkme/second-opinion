@@ -148,9 +148,12 @@ state: an HTML marker comment on the PR (one review per head SHA) — no databas
 A review pass is **degraded** when it times out, the `pi` subprocess exits non-zero (bad
 key, a `402 … requires more credits`, an unknown model id, a server 5xx/OOM), or it exits
 cleanly but produces *no* review output (a review prompt never legitimately yields nothing).
-Each degraded pass emits a GitHub Actions annotation at the point of failure — a `::warning`
+A PR whose head commit can't even be checked out (`git worktree add` fails) counts the same
+way — the reviewer never ran, which is not a clean bill of health. Each degraded pass emits
+a GitHub Actions annotation at the point of failure — a `::warning`
 for a timeout or empty output, a `::error` carrying the subprocess's own message (so a `402`
-surfaces the *why*) for a non-zero exit — visible in the checks UI and the job summary.
+surfaces the *why*) for a non-zero exit or a failed checkout — visible in the checks UI and
+the job summary.
 
 If a pass degrades **and no review is posted for that PR**, the run exits non-zero (code 2),
 turning the check red. This is a tripwire for reviewer *malfunction*, not review *findings*:
@@ -162,7 +165,9 @@ old always-green-on-empty behavior quietly violated.
 It's still **advisory, never a merge gate**: keep the job out of branch protection / required
 checks (the example workflow does). A red advisory check is a signal, not a block. To keep the
 old always-green behavior, set `fail-on-degraded: "false"` (or `FAIL_ON_DEGRADED=false` for the
-CLI/daemon). In `--watch` mode a degraded pass annotates but never kills the daemon.
+CLI/daemon). In `--watch` mode a degraded pass annotates but never kills the daemon. `--dry-run`
+follows the same contract: a preview whose passes all degrade also exits `2` (nothing was
+posted) — set `FAIL_ON_DEGRADED=false` if a wrapper script needs a guaranteed-`0` preview.
 
 ## Providers & cost
 

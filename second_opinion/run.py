@@ -133,12 +133,16 @@ def _annotate(level: str, msg: str) -> None:
     """Emit a GitHub Actions workflow annotation (surfaces in the checks UI + job
     summary), flushed at the point of failure so a later hang/timeout can't swallow it.
     Off Actions it's just a line on stdout — harmless."""
+    # The runner percent-decodes %25/%0D/%0A in the message, so escape them (the inverse,
+    # per actions/toolkit escapeData) or a literal "%25" in pi's stderr renders as "%".
+    msg = msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
     print(f"::{level} title=second-opinion::{msg}", flush=True)
 
 
 def _should_fail(posted: bool, degraded: bool) -> bool:
-    """The tripwire: a degraded pass (timeout / non-zero pi exit / empty output) that
-    produced NO posted review is a silent failure — surface it as a non-zero exit. A
+    """The tripwire: a degraded pass (timeout / non-zero pi exit / empty output / failed
+    head-checkout) that produced NO posted review is a silent failure — surface it as a
+    non-zero exit. A
     posted review is success even when a K>1 sibling degraded, and a clean run with
     nothing to say (no degraded pass) stays green."""
     return degraded and not posted
@@ -247,7 +251,8 @@ DEGRADED = {"timeout", "error", "empty"}
 
 
 class ReviewOutcome(NamedTuple):
-    """Per-PR result: whether a review was posted, and whether any pass degraded."""
+    """Per-PR result: whether a review was posted, and whether any pass (or the head
+    checkout itself) degraded."""
     posted: bool
     degraded: bool
 
@@ -273,9 +278,9 @@ def run_pass(wt: str, model: str, system: str, user: str) -> PassResult:
         # Surface the failure (bad key, 402 out-of-credits, unknown model id, server
         # 4xx/OOM) instead of leaving only a "0c" line. Partial stdout from a crash isn't
         # trustworthy. The annotation carries WHY (e.g. the 402 message) to the operator.
-        detail = " ".join((p.stderr or p.stdout or "").split())[:150]
-        log(f"pi pass exited {p.returncode}: {(p.stderr or p.stdout or '').strip()[:200]}")
-        _annotate("error", f"pi exited {p.returncode} — {detail}")
+        detail = " ".join((p.stderr or p.stdout or "").split())[:200]
+        log(f"pi pass exited {p.returncode}: {detail}")
+        _annotate("error", f"pi exited {p.returncode} — {detail[:150]}")
         return PassResult("", "error")
     text = (p.stdout or "").strip()
     if not text:
@@ -343,8 +348,12 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     _git(["worktree", "remove", "--force", wt], check=False)
     add = _git(["worktree", "add", "--detach", "--force", wt, sha], check=False)
     if add.returncode != 0:
-        log(f"#{pr}: worktree add failed @ {sha[:10]}: {add.stderr.strip()[:120]}")
-        return ReviewOutcome(False, False)
+        # The reviewer never ran — the same silent-failure class as a degraded pass
+        # (the PR stays unreviewed), so it must trip the tripwire, not slip out green.
+        detail = " ".join((add.stderr or "").split())[:120]
+        log(f"#{pr}: worktree add failed @ {sha[:10]}: {detail}")
+        _annotate("error", f"#{pr}: worktree add failed @ {sha[:10]} — {detail} — no review produced")
+        return ReviewOutcome(False, True)
 
     passes: list[str] = []
     degraded = False
@@ -382,7 +391,10 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     try:
         _gh(["pr", "comment", str(pr), "--body-file", tmp])
     finally:
-        os.unlink(tmp)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass  # cleanup only — must not escape and turn a posted review into exit 2
     log(f"#{pr}: posted {pass_label} review ({model})")
     return ReviewOutcome(True, degraded)
 

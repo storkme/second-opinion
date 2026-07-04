@@ -11,11 +11,7 @@ sys.modules.setdefault("requests", types.ModuleType("requests"))
 
 from second_opinion import eval as ev  # noqa: E402
 from second_opinion import run  # noqa: E402
-
-
-class _CP:  # fake subprocess.CompletedProcess
-    def __init__(self, stdout="", returncode=0, stderr=""):
-        self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
+from tests.fakes import FakeProc as _CP  # noqa: E402  fake subprocess.CompletedProcess
 
 
 def test_score_recomputes_recall_fp_validextras():
