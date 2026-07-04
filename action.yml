@@ -59,6 +59,13 @@ inputs:
       z-ai/glm-5.2 is). Set false for a non-reasoning model so pi omits reasoning params."
     required: false
     default: "true"
+  fail-on-degraded:
+    description: "Fail the check (exit 2) when a pass degrades — times out, exits
+      non-zero, or produces no review — and no review was posted. Surfaces reviewer
+      malfunction, not review findings (a posted review always passes). Set 'false' for
+      the old always-green behavior."
+    required: false
+    default: "true"
 
 runs:
   using: "docker"
@@ -80,3 +87,4 @@ runs:
     PASS_TIMEOUT_S: ${{ inputs.pass-timeout-seconds }}
     TOOLS: ${{ inputs.tools }}
     PI_REASONING: ${{ inputs.reasoning }}
+    FAIL_ON_DEGRADED: ${{ inputs.fail-on-degraded }}

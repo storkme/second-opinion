@@ -145,9 +145,9 @@ def review_diff(rec: dict, model: str) -> str:
     try:
         for i in range(run.K):
             diff_use = filtered if i == 0 else rv.shuffle_inputs(filtered, i)
-            text = run.run_pass(wt, model, system, user_turn(diff_use))
-            if text:
-                passes.append(text)
+            result = run.run_pass(wt, model, system, user_turn(diff_use))
+            if result.text:
+                passes.append(result.text)
     finally:
         run._git(["worktree", "remove", "--force", wt], check=False)
     if not passes:
