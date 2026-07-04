@@ -59,6 +59,7 @@ See [`examples/second-opinion.yml`](examples/second-opinion.yml) for the fuller 
 | `pass-timeout-seconds` | `900` | per-pass timeout |
 | `tools` | `read,bash` | agent tool grant; set `read` to drop shell (see Security) |
 | `reasoning` | `true` | set `false` for a non-reasoning `model` |
+| `fail-on-degraded` | `true` | fail the check when a pass degrades and posts no review ([below](#degraded-passes-fail-the-check)) |
 
 ## Quickstart — self-hosted daemon
 
@@ -141,6 +142,27 @@ state: an HTML marker comment on the PR (one review per head SHA) — no databas
 - **Two providers, two merge backends.** `PROVIDER` picks the review backend (`openrouter`
   or `local`); `MERGE_PROVIDER` picks the `K>1` union backend (defaults to `PROVIDER`).
   `PROVIDER=local` needs no cloud credential at all.
+
+## Degraded passes fail the check
+
+A review pass is **degraded** when it times out, the `pi` subprocess exits non-zero (bad
+key, a `402 … requires more credits`, an unknown model id, a server 5xx/OOM), or it exits
+cleanly but produces *no* review output (a review prompt never legitimately yields nothing).
+Each degraded pass emits a GitHub Actions annotation at the point of failure — a `::warning`
+for a timeout or empty output, a `::error` carrying the subprocess's own message (so a `402`
+surfaces the *why*) for a non-zero exit — visible in the checks UI and the job summary.
+
+If a pass degrades **and no review is posted for that PR**, the run exits non-zero (code 2),
+turning the check red. This is a tripwire for reviewer *malfunction*, not review *findings*:
+a posted review — however critical — always exits `0`, and a `K>1` run where one pass
+succeeds posts and passes (its degraded sibling downgrades to an annotation only). It honors
+the banner's own promise — *"Silence ≠ clean. Treat as a tripwire, not a gate."* — which the
+old always-green-on-empty behavior quietly violated.
+
+It's still **advisory, never a merge gate**: keep the job out of branch protection / required
+checks (the example workflow does). A red advisory check is a signal, not a block. To keep the
+old always-green behavior, set `fail-on-degraded: "false"` (or `FAIL_ON_DEGRADED=false` for the
+CLI/daemon). In `--watch` mode a degraded pass annotates but never kills the daemon.
 
 ## Providers & cost
 

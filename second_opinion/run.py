@@ -33,6 +33,8 @@ Env:
   PASS_TIMEOUT_S      per-pass timeout (default: 900 openrouter / 1800 local)
   TOOLS               pi tool grant (default read,bash; set read to drop shell)
   PI_REASONING        whether the model is a reasoning model (default true)
+  FAIL_ON_DEGRADED    exit 2 when a degraded pass posts no review (default true; set
+                      false for the old always-green behavior)
   REPO_DIR            repo checkout (default: cwd)
 
 Usage: run.py [--pr N] [--dry-run] [--force] [--watch [--interval S]]
@@ -46,6 +48,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import requests
 
@@ -80,6 +83,11 @@ PI_FLAGS = ["--no-session", "--no-extensions", "--no-skills", "--no-themes",
 # TOOLS=read to drop shell access on repos with untrusted PR authors. bash is NOT
 # sandboxed — see the README Security section.
 TOOLS = os.environ.get("TOOLS", "").strip() or "read,bash"
+# A silent failure (a degraded pass that posts no review) exits non-zero so the check
+# turns red — a tripwire for reviewer *malfunction*, not review *findings*. Opt out for
+# the old always-green behavior.
+FAIL_ON_DEGRADED = (os.environ.get("FAIL_ON_DEGRADED", "true").strip().lower()
+                    in ("1", "true", "yes", "on"))
 MARKER = "<!-- second-opinion sha={sha} -->"
 
 MERGE_PROMPT = """\
@@ -119,6 +127,21 @@ HEADER = """{marker}
 
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def _annotate(level: str, msg: str) -> None:
+    """Emit a GitHub Actions workflow annotation (surfaces in the checks UI + job
+    summary), flushed at the point of failure so a later hang/timeout can't swallow it.
+    Off Actions it's just a line on stdout — harmless."""
+    print(f"::{level} title=second-opinion::{msg}", flush=True)
+
+
+def _should_fail(posted: bool, degraded: bool) -> bool:
+    """The tripwire: a degraded pass (timeout / non-zero pi exit / empty output) that
+    produced NO posted review is a silent failure — surface it as a non-zero exit. A
+    posted review is success even when a K>1 sibling degraded, and a clean run with
+    nothing to say (no degraded pass) stays green."""
+    return degraded and not posted
 
 
 def _guidance() -> str:
@@ -212,7 +235,24 @@ def already_reviewed(n: int, sha: str) -> bool:
     return out.strip() != ""
 
 
-def run_pass(wt: str, model: str, system: str, user: str) -> str:
+class PassResult(NamedTuple):
+    """One agentic pass. `status` is "ok" (usable review text) or a degraded cause:
+    "timeout", "error" (pi exited non-zero), or "empty" (exit 0 but no output — a review
+    prompt never legitimately yields nothing)."""
+    text: str
+    status: str
+
+
+DEGRADED = {"timeout", "error", "empty"}
+
+
+class ReviewOutcome(NamedTuple):
+    """Per-PR result: whether a review was posted, and whether any pass degraded."""
+    posted: bool
+    degraded: bool
+
+
+def run_pass(wt: str, model: str, system: str, user: str) -> PassResult:
     cmd = (["pi", "--provider", PI_PROVIDER, "--model", model] + PI_FLAGS
            + ["--tools", TOOLS, "--append-system-prompt", system, "-p", user])
     # Defense-in-depth: don't hand the agent's shell the GitHub token. pi reaches the
@@ -227,13 +267,24 @@ def run_pass(wt: str, model: str, system: str, user: str) -> str:
                            timeout=PASS_TIMEOUT_S, env=env)
     except subprocess.TimeoutExpired:
         log(f"pi pass timed out after {PASS_TIMEOUT_S}s")
-        return ""
+        _annotate("warning", f"pi pass timed out after {PASS_TIMEOUT_S}s — no review produced")
+        return PassResult("", "timeout")
     if p.returncode != 0:
-        # Surface the failure (bad key, unknown model id, server 4xx/OOM) instead of
-        # leaving only a "0c" line. Partial stdout from a crash isn't trustworthy.
-        log(f"pi pass exited {p.returncode}: {(p.stderr or '').strip()[:200]}")
-        return ""
-    return (p.stdout or "").strip()
+        # Surface the failure (bad key, 402 out-of-credits, unknown model id, server
+        # 4xx/OOM) instead of leaving only a "0c" line. Partial stdout from a crash isn't
+        # trustworthy. The annotation carries WHY (e.g. the 402 message) to the operator.
+        detail = " ".join((p.stderr or p.stdout or "").split())[:150]
+        log(f"pi pass exited {p.returncode}: {(p.stderr or p.stdout or '').strip()[:200]}")
+        _annotate("error", f"pi exited {p.returncode} — {detail}")
+        return PassResult("", "error")
+    text = (p.stdout or "").strip()
+    if not text:
+        # Exit 0 with nothing to say: the model returned no review at all. Treat as a
+        # degraded pass, not a clean bill of health.
+        log("pi pass exited 0 but produced no review output")
+        _annotate("warning", "pass completed but produced no review output")
+        return PassResult("", "empty")
+    return PassResult(text, "ok")
 
 
 def _chat(base_url: str, api_key: str, model: str, prompt: str) -> str:
@@ -272,12 +323,12 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
     return out
 
 
-def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_run: bool) -> bool:
+def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_run: bool) -> ReviewOutcome:
     diff = _gh(["pr", "diff", str(pr)])
     filtered, _files, truncated = rv.filter_diff(diff, _exclude_globs(), MAX_DIFF_CHARS)
     if not filtered.strip():
         log(f"#{pr}: empty filtered diff — skipping")
-        return False
+        return ReviewOutcome(False, False)
 
     system = rv.system_prompt(PROJECT, _guidance())
 
@@ -293,23 +344,26 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     add = _git(["worktree", "add", "--detach", "--force", wt, sha], check=False)
     if add.returncode != 0:
         log(f"#{pr}: worktree add failed @ {sha[:10]}: {add.stderr.strip()[:120]}")
-        return False
+        return ReviewOutcome(False, False)
 
     passes: list[str] = []
+    degraded = False
     try:
         for i in range(K):
             diff_use = filtered if i == 0 else rv.shuffle_inputs(filtered, i)
             t0 = time.time()
-            text = run_pass(wt, model, system, user_turn(diff_use))
-            log(f"#{pr}: pass {i+1}/{K} — {len(text)}c in {time.time()-t0:.0f}s")
-            if text:
-                passes.append(text)
+            result = run_pass(wt, model, system, user_turn(diff_use))
+            log(f"#{pr}: pass {i+1}/{K} — {len(result.text)}c in {time.time()-t0:.0f}s")
+            if result.status in DEGRADED:
+                degraded = True
+            if result.text:
+                passes.append(result.text)
     finally:
         _git(["worktree", "remove", "--force", wt], check=False)
 
     if not passes:
         log(f"#{pr}: all passes empty — not posting")
-        return False
+        return ReviewOutcome(False, degraded)
 
     k = len(passes)
     review_body = passes[0] if k == 1 else merge_reviews(pr, title, passes, merge_model)
@@ -321,7 +375,7 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
 
     if dry_run:
         print("\n" + "=" * 72 + f"\nDRY RUN — would post to #{pr}:\n" + "=" * 72 + f"\n{body}\n")
-        return True
+        return ReviewOutcome(True, degraded)
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(body)
         tmp = f.name
@@ -330,14 +384,17 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     finally:
         os.unlink(tmp)
     log(f"#{pr}: posted {pass_label} review ({model})")
-    return True
+    return ReviewOutcome(True, degraded)
 
 
-def sweep(args: argparse.Namespace) -> None:
-    """One pass over candidate PRs: resolve the model, register it with pi, review."""
+def sweep(args: argparse.Namespace) -> bool:
+    """One pass over candidate PRs: resolve the model, register it with pi, review.
+    Returns True if any PR ended in a silent failure (a degraded pass — or an unhandled
+    review error — that posted no review); the single-shot caller turns that into a
+    non-zero exit. Never aborts the sweep early: every candidate PR is still processed."""
     model = resolve_model()
     if model is None:
-        return
+        return False
     write_models_json(model)  # register the provider's model with pi
     merge_model = _merge_model_for(model)
 
@@ -345,6 +402,7 @@ def sweep(args: argparse.Namespace) -> None:
     merge_desc = f"{MERGE_PROVIDER}:{merge_model}" if K > 1 else "n/a (K=1)"
     log(f"second opinion · provider={PROVIDER} · model={model} · K={K} · merge={merge_desc} "
         f"· {len(targets)} candidate PR(s)")
+    silent_failure = False
     for t in targets:
         n, sha, title = t["number"], t["headRefOid"], t["title"]
         if t.get("isDraft") and not args.force:
@@ -354,9 +412,16 @@ def sweep(args: argparse.Namespace) -> None:
             log(f"#{n}: head {sha[:10]} already reviewed — skipping")
             continue
         try:
-            review_pr(n, title, sha, model, merge_model, args.dry_run)
+            outcome = review_pr(n, title, sha, model, merge_model, args.dry_run)
+            if _should_fail(outcome.posted, outcome.degraded):
+                silent_failure = True
         except Exception as e:  # noqa: BLE001 — one PR's failure shouldn't sink the rest
+            # An unhandled review error also leaves the PR unreviewed while the job would
+            # otherwise stay green — the same silent-failure class, so surface it too.
             log(f"#{n}: ERROR {str(e)[:200]} — continuing")
+            _annotate("error", f"#{n}: review errored — {' '.join(str(e).split())[:150]}")
+            silent_failure = True
+    return silent_failure
 
 
 def _require(name: str) -> None:
@@ -384,9 +449,16 @@ def main() -> None:
         _require("LLAMA_SERVER_URL")
 
     if not args.watch:
-        sweep(args)
+        silent_failure = sweep(args)
+        # A silent failure has already annotated at the point of failure; exit 2 so the
+        # check turns red (unless the operator opted out). Not a gate on review content —
+        # a posted review, however critical, always exits 0.
+        if silent_failure and FAIL_ON_DEGRADED:
+            raise SystemExit(2)
         return
 
+    # Watch/daemon mode: degraded passes still annotate, but a silent failure must NOT
+    # kill the daemon — it keeps sweeping. So the return is intentionally ignored here.
     log(f"watch mode · interval={args.interval}s")
     while True:
         try:

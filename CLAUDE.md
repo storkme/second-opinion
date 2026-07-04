@@ -51,7 +51,11 @@ being *decorrelated* from them: a genuinely independent second pair of eyes, not
   checked-out repo freely but never to read other reviewers' comments, fetch PR discussion,
   or edit/commit/push. This is a review-quality property, not a security boundary.
 - **Advisory, never a gate.** Output always carries "Silence ≠ clean — treat as a tripwire,
-  not a gate." Never wire this into branch protection / required checks.
+  not a gate." Never wire this into branch protection / required checks. The one place the
+  job exits non-zero is the **silent-failure tripwire**: a degraded pass (timeout / non-zero
+  pi exit / empty output) that posts *no* review exits `2` so the check turns red (annotated
+  at the point of failure; `FAIL_ON_DEGRADED=false` opts out). That gates on reviewer
+  *malfunction*, never on review *findings* — a posted review always exits `0`.
 - **Recall framing stays honest & generic.** Do NOT hardcode sisyphus's measured numbers
   (e.g. "~0.35 recall vs claude[bot]") or links to `pr-review/LESSONS.md` — that's
   sisyphus's measured-basis research and it stays in sisyphus. Here: "recall not separately
@@ -120,6 +124,7 @@ agentic path never used.
 | `PASS_TIMEOUT_S` | `900` | per-pass timeout |
 | `TOOLS` | `read,bash` | pi tool grant; `read` drops shell (safer on untrusted authors) |
 | `PI_REASONING` | `true` | honored for **both** providers; set `false` for a non-reasoning model |
+| `FAIL_ON_DEGRADED` | `true` | exit `2` when a degraded pass (timeout / non-zero pi exit / empty output) posts no review; `false` restores always-green |
 | `REPO_DIR` | cwd | the target repo checkout |
 
 `--watch` / `--interval N` are CLI flags (daemon mode); `--pr N`, `--dry-run`, `--force`

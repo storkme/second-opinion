@@ -7,6 +7,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- A **degraded** review pass — one that times out, exits non-zero (e.g. a `402` out-of-credits),
+  or exits cleanly with *no* review output — now emits a GitHub Actions annotation at the point
+  of failure (`::warning` / `::error`, the latter carrying the subprocess's own message so a `402`
+  surfaces the *why*) and, when the PR gets no posted review, fails the check (exit 2) instead of
+  exiting silently green. It gates on reviewer *malfunction*, never on review *findings*: a posted
+  review always exits `0`, and a `K>1` run where one pass succeeds posts and passes (its degraded
+  sibling downgrades to an annotation only). New `fail-on-degraded` input (`FAIL_ON_DEGRADED` env),
+  default `true`; set `false` for the old always-green behavior. In `--watch` mode a degraded pass
+  annotates but never kills the daemon. (#11)
+
 ### Added
 - `second-opinion-eval` CLI — measure the reviewer's recall against a real review loop:
   reconstruct a merged PR's pre-fix diff (the commit the loop's reviewer commented on most),

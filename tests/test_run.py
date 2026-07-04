@@ -43,6 +43,65 @@ def test_merge_reviews_raises_clean_on_malformed_200():
             raise AssertionError(f"expected RuntimeError for payload {payload}")
 
 
+class _FakeProc:
+    """Stand-in for subprocess.CompletedProcess — only the fields run_pass reads."""
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _capture_annotations():
+    calls = []
+    run._annotate = lambda level, msg: calls.append((level, msg))
+    return calls
+
+
+def test_run_pass_ok_returns_text_and_status():
+    run.subprocess.run = lambda *a, **k: _FakeProc(0, stdout="  real findings  ")
+    ann = _capture_annotations()
+    res = run.run_pass("/wt", "m", "sys", "usr")
+    assert res.status == "ok" and res.text == "real findings"
+    assert res.status not in run.DEGRADED
+    assert ann == []  # a good pass never annotates
+
+
+def test_run_pass_timeout_is_degraded_and_warns():
+    def boom(*a, **k):
+        raise run.subprocess.TimeoutExpired(cmd="pi", timeout=run.PASS_TIMEOUT_S)
+    run.subprocess.run = boom
+    ann = _capture_annotations()
+    res = run.run_pass("/wt", "m", "sys", "usr")
+    assert res.status == "timeout" and res.text == "" and res.status in run.DEGRADED
+    assert ann[0][0] == "warning" and "timed out" in ann[0][1]
+
+
+def test_run_pass_nonzero_exit_surfaces_stderr_verbatim():
+    # The 402 out-of-credits message must reach the operator via the error annotation.
+    msg = "402 This request requires more credits, or fewer max_tokens"
+    run.subprocess.run = lambda *a, **k: _FakeProc(1, stderr=msg + "\n")
+    ann = _capture_annotations()
+    res = run.run_pass("/wt", "m", "sys", "usr")
+    assert res.status == "error" and res.text == "" and res.status in run.DEGRADED
+    assert ann[0][0] == "error" and "exited 1" in ann[0][1] and "402" in ann[0][1]
+
+
+def test_run_pass_empty_clean_exit_is_degraded():
+    run.subprocess.run = lambda *a, **k: _FakeProc(0, stdout="   \n  ")
+    ann = _capture_annotations()
+    res = run.run_pass("/wt", "m", "sys", "usr")
+    assert res.status == "empty" and res.text == "" and res.status in run.DEGRADED
+    assert ann[0][0] == "warning" and "no review output" in ann[0][1]
+
+
+def test_should_fail_only_on_degraded_without_post():
+    # The exit-2 contract: a degraded pass that posted nothing is the only failure.
+    assert run._should_fail(posted=False, degraded=True) is True   # silent failure → exit 2
+    assert run._should_fail(posted=True, degraded=True) is False   # posted review wins
+    assert run._should_fail(posted=False, degraded=False) is False  # clean empty sweep
+    assert run._should_fail(posted=True, degraded=False) is False
+
+
 def test_already_reviewed_matches_marker_at_start_only():
     seen = {}
 
