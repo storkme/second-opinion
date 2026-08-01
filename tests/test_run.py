@@ -144,6 +144,40 @@ def test_review_pr_worktree_add_failure_is_degraded_and_annotates():
     assert ann[0][0] == "error" and "worktree add failed" in ann[0][1]
 
 
+def test_review_pr_parallel_passes_run_concurrently_and_keep_order():
+    # With PARALLEL_PASSES, all K passes must be in flight AT ONCE — the barrier
+    # times out loudly if any pass waits for another (i.e. the loop went
+    # sequential). Results keep index order, empties are dropped, and a degraded
+    # sibling of a posted union still reports degraded=True per the exit contract.
+    import threading
+    barrier = threading.Barrier(3, timeout=10)
+    run.K, run.PARALLEL_PASSES = 3, True
+    run._gh = lambda args, timeout_s=60: (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n")
+    run._git = lambda args, check=True: FakeProc(0)
+    run.rv.shuffle_inputs = lambda d, i: f"<<{i}>>"
+    merged = {}
+
+    def fake_merge(pr, title, passes, merge_model=None):
+        merged["passes"] = passes
+        return "MERGED"
+
+    run.merge_reviews = fake_merge
+
+    def fake_pass(wt, model, system, user):
+        barrier.wait()
+        tag = user.split("<<")[1].split(">>")[0] if "<<" in user else "0"
+        if tag == "1":
+            return run.PassResult("", "timeout")  # one degraded sibling
+        return run.PassResult(f"pass-{tag}", "ok")
+
+    run.run_pass = fake_pass
+    _capture_annotations()
+    out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+    assert out == run.ReviewOutcome(posted=True, degraded=True)
+    assert merged["passes"] == ["pass-0", "pass-2"]  # index order kept, empty dropped
+
+
 def test_already_reviewed_matches_marker_at_start_only():
     seen = {}
 

@@ -31,6 +31,7 @@ Env:
   EXCLUDE_GLOBS       comma-separated globs to drop (default: lockfiles/build/images)
   MAX_DIFF_CHARS      diff cap (default 60000)
   PASS_TIMEOUT_S      per-pass timeout (default: 900 openrouter / 1800 local)
+  PARALLEL_PASSES     run the K passes concurrently (default: true openrouter / false local)
   TOOLS               pi tool grant (default read,bash; set read to drop shell)
   PI_REASONING        whether the model is a reasoning model (default true)
   FAIL_ON_DEGRADED    exit 2 when a degraded pass posts no review (default true; set
@@ -47,6 +48,7 @@ import os
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
 
@@ -76,6 +78,12 @@ MERGE_MODEL = os.environ.get("MERGE_MODEL", "").strip()
 MAX_DIFF_CHARS = int(os.environ.get("MAX_DIFF_CHARS", "").strip() or "60000")
 _pt = os.environ.get("PASS_TIMEOUT_S", "").strip()
 PASS_TIMEOUT_S = int(_pt) if _pt else (900 if PROVIDER == "openrouter" else 1800)
+# Hosted passes are independent subprocesses bottlenecked on the provider, so run
+# them concurrently — wall-clock ≈ one pass instead of K. A local llama-server
+# serializes inference, so concurrent requests would just starve each other into
+# the pass timeout; default off there. Override with PARALLEL_PASSES=true/false.
+_pl = os.environ.get("PARALLEL_PASSES", "").strip().lower()
+PARALLEL_PASSES = (_pl in ("1", "true", "yes", "on")) if _pl else (PROVIDER == "openrouter")
 REPO_DIR = os.environ.get("REPO_DIR", "").strip() or os.getcwd()
 PI_FLAGS = ["--no-session", "--no-extensions", "--no-skills", "--no-themes",
             "--no-prompt-templates"]
@@ -375,20 +383,26 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         _annotate("error", f"#{pr}: worktree add failed @ {sha[:10]} — {detail} — no review produced")
         return ReviewOutcome(False, True)
 
-    passes: list[str] = []
-    degraded = False
     try:
-        for i in range(K):
+        def one_pass(i: int) -> PassResult:
             diff_use = filtered if i == 0 else rv.shuffle_inputs(filtered, i)
             t0 = time.time()
             result = run_pass(wt, model, system, user_turn(diff_use))
             log(f"#{pr}: pass {i+1}/{K} — {len(result.text)}c in {time.time()-t0:.0f}s")
-            if result.status in DEGRADED:
-                degraded = True
-            if result.text:
-                passes.append(result.text)
+            return result
+
+        # Concurrent passes share the one read-only worktree checkout — the same
+        # sharing the sequential loop already did, so no new hazard class: pi only
+        # reads for a review prompt.
+        if K > 1 and PARALLEL_PASSES:
+            with ThreadPoolExecutor(max_workers=K) as pool:
+                results = list(pool.map(one_pass, range(K)))
+        else:
+            results = [one_pass(i) for i in range(K)]
     finally:
         _git(["worktree", "remove", "--force", wt], check=False)
+    degraded = any(r.status in DEGRADED for r in results)
+    passes = [r.text for r in results if r.text]
 
     if not passes:
         log(f"#{pr}: all passes empty — not posting")

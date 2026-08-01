@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- The `K>1` review passes now run **concurrently** for hosted providers (wall-clock ≈ one
+  pass instead of K). A local llama-server keeps the sequential loop — it serializes
+  inference, so concurrent requests would just starve each other into the pass timeout.
+  Override either way with `PARALLEL_PASSES=true|false`.
+
 ### Fixed
 - The `K>1` **union merge** now retries once when the merge model returns no usable content or
   the request raises (reasoning models flake empty on long merge prompts — observed live on
