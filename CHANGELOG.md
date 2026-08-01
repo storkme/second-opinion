@@ -5,6 +5,18 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Fixed
+- The `K>1` **union merge** now retries once when the merge model returns no usable content or
+  the request raises (reasoning models flake empty on long merge prompts — observed live on
+  spaghettio#561: a 200-OK with no content right after all 3 passes succeeded, which failed the
+  whole run and, under `fail-on-degraded`, redded the check). If the retry also fails, the run
+  **falls back to posting the raw passes unmerged** (with a header note and a `::warning`
+  annotation) instead of erroring: the passes are the review, the merge is editorial, so a
+  merge-step outage degrades formatting — never delivery. Same retry policy the eval judge has
+  had since #9.
+
 ## [1.2.0] - 2026-07-04
 
 ### Fixed

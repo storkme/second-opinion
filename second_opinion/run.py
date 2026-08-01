@@ -294,8 +294,8 @@ def run_pass(wt: str, model: str, system: str, user: str) -> PassResult:
 
 def _chat(base_url: str, api_key: str, model: str, prompt: str) -> str:
     """One non-agentic chat completion (used by the K>1 merge). Defensive parse: returns
-    "" on any malformed-but-200 envelope (empty choices / error / moderation shape) so the
-    caller raises a clean error instead of a raw KeyError/IndexError leaking out."""
+    "" on any malformed-but-200 envelope (empty choices / error / moderation shape) so
+    callers can retry or fail cleanly instead of a raw KeyError/IndexError leaking out."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -312,20 +312,40 @@ def _chat(base_url: str, api_key: str, model: str, prompt: str) -> str:
 
 
 def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | None = None) -> str:
-    """Union the K passes via one merge call (only used when K>1)."""
+    """Union the K passes via one merge call (only used when K>1).
+
+    Reasoning models flake empty on long merge prompts (observed live: a 200-OK with
+    no usable content from deepseek-v4-flash right after all 3 passes succeeded,
+    spaghettio#561) — retry once, the same policy as the eval judge. If the retry
+    also fails, fall back to posting the raw passes unmerged: the passes ARE the
+    review and the merge is editorial, so a merge-step outage degrades the
+    formatting, never the delivery. The fallback annotates a warning so the operator
+    still sees the malfunction without the check going red over formatting."""
     merge_model = merge_model or MERGE_MODEL or MODEL
     passes_block = "\n\n".join(
         f"=== PASS {i+1} of {len(passes)} (independent) ===\n{p}"
         for i, p in enumerate(passes))
     prompt = MERGE_PROMPT.format(pr=pr, title=title, passes_block=passes_block)
-    if MERGE_PROVIDER == "local":
-        out = _chat(LLAMA_SERVER_URL, "", merge_model, prompt)
-    else:
-        key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-        out = _chat(OPENROUTER_BASE, key, merge_model, prompt)
-    if not out:
-        raise RuntimeError(f"merge ({MERGE_PROVIDER}/{merge_model}) returned no usable content")
-    return out
+    for attempt in (1, 2):
+        failure = "returned no usable content"
+        try:
+            if MERGE_PROVIDER == "local":
+                out = _chat(LLAMA_SERVER_URL, "", merge_model, prompt)
+            else:
+                key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+                out = _chat(OPENROUTER_BASE, key, merge_model, prompt)
+        except Exception as e:  # noqa: BLE001 — transient HTTP failures retry like empties
+            out = ""
+            failure = f"raised {type(e).__name__}: {str(e)[:120]}"
+        if out:
+            return out
+        log(f"merge ({MERGE_PROVIDER}/{merge_model}) attempt {attempt}/2 {failure}")
+    _annotate("warning",
+              f"union merge failed twice ({failure}) — posting {len(passes)} raw passes unmerged")
+    parts = [f"*(union merge unavailable — the {len(passes)} independent passes follow "
+             "unmerged; findings may repeat or disagree between passes)*"]
+    parts += [f"### Pass {i+1} of {len(passes)}\n\n{p}" for i, p in enumerate(passes)]
+    return "\n\n---\n\n".join(parts)
 
 
 def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_run: bool) -> ReviewOutcome:

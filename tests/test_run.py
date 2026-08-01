@@ -35,17 +35,39 @@ def test_merge_reviews_parses_and_strips_content():
     assert run.merge_reviews(1, "t", ["pass a", "pass b"]) == "merged"
 
 
-def test_merge_reviews_raises_clean_on_malformed_200():
-    # empty choices / error envelope / moderation-shaped — must be a clean RuntimeError,
-    # not a raw KeyError/IndexError leaking to the caller.
-    for payload in ({"choices": []}, {"error": {"message": "bad"}}, {}, {"choices": [{}]}):
-        run.requests.post = lambda *a, p=payload, **k: _Resp(p)
-        try:
-            run.merge_reviews(1, "t", ["a"])
-        except RuntimeError as e:
-            assert "no usable content" in str(e)
-        else:
-            raise AssertionError(f"expected RuntimeError for payload {payload}")
+def test_merge_reviews_retries_once_on_empty_then_succeeds():
+    # A flaky-empty first attempt (reasoning models on long merge prompts —
+    # spaghettio#561) must be retried, and a successful retry never annotates.
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return _Resp({"choices": []})
+        return _Resp({"choices": [{"message": {"content": " merged "}}]})
+
+    run.requests.post = post
+    ann = _capture_annotations()
+    assert run.merge_reviews(1, "t", ["pass a", "pass b"]) == "merged"
+    assert len(calls) == 2 and ann == []
+
+
+def test_merge_reviews_falls_back_to_raw_passes_after_two_failures():
+    # Malformed-200 shapes (empty choices / error envelope / moderation-shaped) and a
+    # raising transport alike: nothing may leak to the caller — both attempts fail,
+    # the review degrades to the unmerged raw passes, and a warning annotates so the
+    # operator sees the malfunction without the delivery being lost.
+    def raising(*a, **k):
+        raise ValueError("boom")
+
+    posts = [lambda *a, p=p, **k: _Resp(p)
+             for p in ({"choices": []}, {"error": {"message": "bad"}}, {}, {"choices": [{}]})]
+    for post in posts + [raising]:
+        run.requests.post = post
+        ann = _capture_annotations()
+        out = run.merge_reviews(1, "t", ["pass a", "pass b"])
+        assert "pass a" in out and "pass b" in out and "unmerged" in out
+        assert ann[0][0] == "warning" and "merge failed twice" in ann[0][1]
 
 
 def _capture_annotations():
