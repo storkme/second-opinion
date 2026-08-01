@@ -303,12 +303,30 @@ def _chat(base_url: str, api_key: str, model: str, prompt: str) -> str:
         f"{base_url}/v1/chat/completions",
         headers=headers,
         json={"model": model, "messages": [{"role": "user", "content": prompt}],
-              "temperature": 0.3, "max_tokens": 16384},
+              "temperature": 0.3, "max_tokens": 16384,
+              # Reasoning-capable models (deepseek-v4-flash included) may spend
+              # the entire max_tokens budget in the reasoning channel and return
+              # an EMPTY `content` on a 200 — observed 3/3 on the spaghettio
+              # #565/#566 merge calls, 2026-08-01, which surfaced as "merge
+              # returned no usable content" failing the required check. The
+              # merge is a mechanical union task that gains nothing from
+              # reasoning; disable it. Non-reasoning models and llama-server's
+              # OpenAI-compat endpoint ignore the field.
+              "reasoning": {"enabled": False}},
         timeout=600,
     )
     r.raise_for_status()
     choices = r.json().get("choices") or []
-    return ((choices[0].get("message") or {}).get("content") or "").strip() if choices else ""
+    msg = (choices[0].get("message") or {}) if choices else {}
+    content = (msg.get("content") or "").strip()
+    if not content and choices:
+        # Diagnose the empty-content-200 shape instead of failing mute:
+        # finish_reason + reasoning length distinguish the reasoning-burn
+        # failure mode from a genuinely empty reply.
+        log(f"_chat: empty content on 200 — finish_reason="
+            f"{choices[0].get('finish_reason')!r}, "
+            f"reasoning_len={len(msg.get('reasoning') or '')}")
+    return content
 
 
 def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | None = None) -> str:
