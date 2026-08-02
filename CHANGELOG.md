@@ -5,6 +5,24 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [1.2.1] - 2026-08-02
+
+### Fixed
+- Review passes on PRs with **large diffs (>100 KB prompt)** no longer crash with
+  `[Errno 7] Argument list too long: 'pi'`. Linux caps a single `execve()` argument at
+  128 KiB (`MAX_ARG_STRLEN`); the diff-bearing user prompt was passed to `pi` inline as
+  one argv element, so any sufficiently large PR failed deterministically before the
+  review even started (observed on spaghettio#569, a 163 KB diff). Prompts above a
+  conservative `PROMPT_ARG_MAX` (env-tunable, default 100000 bytes) are now **piped to
+  `pi` via stdin**, which pi uses verbatim as the initial prompt — the model sees the
+  same bytes as the inline path (pi's `@file` syntax was rejected for this: it wraps
+  content in `<file>` markup, changing the prompt shape and leaking a temp path into
+  model context). Smaller prompts keep the byte-identical inline invocation.
+- An **oversized system prompt** (unbounded operator `GUIDANCE`/`GUIDANCE_FILE`, which
+  rides argv via `--append-system-prompt`) now fails the pass legibly through the normal
+  degraded-pass machinery (error annotation naming the cause) instead of the same opaque
+  E2BIG crash. Guidance is deliberately never clipped.
+
 ## [1.2.0] - 2026-07-04
 
 ### Fixed
@@ -54,7 +72,8 @@ All notable changes to this project are documented here. The format follows
   - Per-project guidance file (the reviewer's "memory"), HTML-marker idempotency (no database),
     and decorrelated, advisory-never-a-gate framing.
 
-[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/storkme/second-opinion/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/storkme/second-opinion/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/storkme/second-opinion/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/storkme/second-opinion/releases/tag/v1.0.0

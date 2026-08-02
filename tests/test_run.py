@@ -135,6 +135,69 @@ def test_already_reviewed_matches_marker_at_start_only():
     assert "startswith" in seen["jq"] and "abc123" in seen["jq"]
 
 
+def test_run_pass_small_prompt_stays_inline_argv():
+    # Below PROMPT_ARG_MAX the invocation must be byte-identical to the historical
+    # one: the prompt itself as the argv element after -p, stdin untouched
+    # (input=None → inherited, exactly as before the E2BIG fix).
+    captured = {}
+
+    def capture(cmd, **k):
+        captured["cmd"] = cmd
+        captured["input"] = k.get("input")
+        return FakeProc(0, stdout="ok")
+
+    run.subprocess.run = capture
+    res = run.run_pass("/wt", "m", "sys", "small prompt")
+    assert res.status == "ok"
+    assert captured["cmd"][-2:] == ["-p", "small prompt"]
+    assert captured["input"] is None
+
+
+def test_run_pass_oversized_prompt_goes_via_stdin_verbatim():
+    # Above PROMPT_ARG_MAX (Linux MAX_ARG_STRLEN guard) the prompt must be piped
+    # via stdin VERBATIM — pi uses piped stdin as the raw initial message, so the
+    # model sees the same bytes as the inline path (unlike @file, which wraps the
+    # content in <file name="..."> markup and leaks the temp path into context).
+    # argv must end with a bare -p (no positional message) and carry no oversized
+    # or @-prefixed element.
+    big = "x" * (run.PROMPT_ARG_MAX + 1)
+    captured = {}
+
+    def capture(cmd, **k):
+        captured["cmd"] = cmd
+        captured["input"] = k.get("input")
+        return FakeProc(0, stdout="ok")
+
+    run.subprocess.run = capture
+    res = run.run_pass("/wt", "m", "sys", big)
+    assert res.status == "ok"
+    assert captured["cmd"][-1] == "-p", "oversized prompt must not ride argv"
+    assert captured["input"] == big, "stdin must carry the prompt verbatim"
+    assert all(not a.startswith("@") for a in captured["cmd"])
+    assert all(len(a.encode()) <= run.PROMPT_ARG_MAX for a in captured["cmd"])
+
+
+def test_run_pass_oversized_system_prompt_fails_legibly_not_e2big():
+    # Operator GUIDANCE rides argv via --append-system-prompt and is unbounded; an
+    # oversized one must become a legible degraded pass (error annotation), never
+    # an opaque execve E2BIG crash — and never a silent clip of the guidance.
+    called = {"run": False}
+
+    def no_run(*a, **k):
+        called["run"] = True
+        return FakeProc(0, stdout="ok")
+
+    run.subprocess.run = no_run
+    ann = _capture_annotations()
+    big_sys = "g" * (run.PROMPT_ARG_MAX + 1)
+    res = run.run_pass("/wt", "m", big_sys, "usr")
+    assert res.status == "error" and res.status in run.DEGRADED
+    assert called["run"] is False, "pi must not be spawned with an oversized system arg"
+    assert ann[0][0] == "error" and "GUIDANCE" in ann[0][1]
+
+# Keep this LAST: it iterates globals() at execution time, so any test defined
+# below it would be silently skipped by the `python -m tests.test_run` runner
+# (found by PR #18's own review bots — the appended tests were being skipped).
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
