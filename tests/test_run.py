@@ -137,54 +137,63 @@ def test_already_reviewed_matches_marker_at_start_only():
 
 def test_run_pass_small_prompt_stays_inline_argv():
     # Below PROMPT_ARG_MAX the invocation must be byte-identical to the historical
-    # one: the prompt itself as the argv element after -p, no temp file involved.
+    # one: the prompt itself as the argv element after -p, stdin untouched
+    # (input=None → inherited, exactly as before the E2BIG fix).
     captured = {}
 
     def capture(cmd, **k):
         captured["cmd"] = cmd
+        captured["input"] = k.get("input")
         return FakeProc(0, stdout="ok")
 
     run.subprocess.run = capture
     res = run.run_pass("/wt", "m", "sys", "small prompt")
     assert res.status == "ok"
     assert captured["cmd"][-2:] == ["-p", "small prompt"]
+    assert captured["input"] is None
 
 
-def test_run_pass_oversized_prompt_goes_via_at_file_and_cleans_up():
-    # Above PROMPT_ARG_MAX (Linux MAX_ARG_STRLEN guard) the prompt must reach pi as
-    # @<tempfile> whose CONTENT is the prompt, and the tempfile must be gone after.
+def test_run_pass_oversized_prompt_goes_via_stdin_verbatim():
+    # Above PROMPT_ARG_MAX (Linux MAX_ARG_STRLEN guard) the prompt must be piped
+    # via stdin VERBATIM — pi uses piped stdin as the raw initial message, so the
+    # model sees the same bytes as the inline path (unlike @file, which wraps the
+    # content in <file name="..."> markup and leaks the temp path into context).
+    # argv must end with a bare -p (no positional message) and carry no oversized
+    # or @-prefixed element.
     big = "x" * (run.PROMPT_ARG_MAX + 1)
     captured = {}
 
     def capture(cmd, **k):
-        arg = cmd[-1]
-        assert arg.startswith("@"), f"expected @file arg, got inline ({len(arg)} chars)"
-        path = arg[1:]
-        with open(path) as fh:
-            captured["content"] = fh.read()
-        captured["path"] = path
+        captured["cmd"] = cmd
+        captured["input"] = k.get("input")
         return FakeProc(0, stdout="ok")
 
     run.subprocess.run = capture
     res = run.run_pass("/wt", "m", "sys", big)
     assert res.status == "ok"
-    assert captured["content"] == big
-    assert not os.path.exists(captured["path"]), "prompt tempfile must be unlinked"
+    assert captured["cmd"][-1] == "-p", "oversized prompt must not ride argv"
+    assert captured["input"] == big, "stdin must carry the prompt verbatim"
+    assert all(not a.startswith("@") for a in captured["cmd"])
+    assert all(len(a.encode()) <= run.PROMPT_ARG_MAX for a in captured["cmd"])
 
 
-def test_run_pass_oversized_prompt_cleans_up_on_timeout_too():
-    big = "y" * (run.PROMPT_ARG_MAX + 1)
-    seen = {}
+def test_run_pass_oversized_system_prompt_fails_legibly_not_e2big():
+    # Operator GUIDANCE rides argv via --append-system-prompt and is unbounded; an
+    # oversized one must become a legible degraded pass (error annotation), never
+    # an opaque execve E2BIG crash — and never a silent clip of the guidance.
+    called = {"run": False}
 
-    def boom(cmd, **k):
-        seen["path"] = cmd[-1][1:]
-        raise run.subprocess.TimeoutExpired(cmd="pi", timeout=run.PASS_TIMEOUT_S)
+    def no_run(*a, **k):
+        called["run"] = True
+        return FakeProc(0, stdout="ok")
 
-    run.subprocess.run = boom
-    _capture_annotations()
-    res = run.run_pass("/wt", "m", "sys", big)
-    assert res.status == "timeout"
-    assert not os.path.exists(seen["path"]), "tempfile must be unlinked even on timeout"
+    run.subprocess.run = no_run
+    ann = _capture_annotations()
+    big_sys = "g" * (run.PROMPT_ARG_MAX + 1)
+    res = run.run_pass("/wt", "m", big_sys, "usr")
+    assert res.status == "error" and res.status in run.DEGRADED
+    assert called["run"] is False, "pi must not be spawned with an oversized system arg"
+    assert ann[0][0] == "error" and "GUIDANCE" in ann[0][1]
 
 # Keep this LAST: it iterates globals() at execution time, so any test defined
 # below it would be silently skipped by the `python -m tests.test_run` runner

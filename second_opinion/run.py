@@ -260,37 +260,40 @@ class ReviewOutcome(NamedTuple):
 # Linux caps a single execve() argument at 128 KiB (MAX_ARG_STRLEN). A large PR's
 # diff-bearing prompt blows past that and the pass dies with E2BIG ("[Errno 7]
 # Argument list too long") before pi even starts — a hard fail unrelated to the
-# review itself. Above this conservative threshold the prompt goes to pi via its
-# @file syntax instead of argv; below it, the argv invocation is byte-identical
-# to what it always was.
+# review itself. Above this conservative threshold the prompt is PIPED TO pi VIA
+# STDIN: pi reads piped (non-TTY) stdin in full and, when no positional message is
+# given, uses it verbatim as the initial prompt (main.js `readPipedStdin`;
+# initial-message.js joins raw parts) — the model sees a byte-identical prompt to
+# the inline-argv path. Deliberately NOT pi's `@file` syntax: pi wraps @file args
+# in `<file name="...">...</file>` markup, so large PRs would get a structurally
+# different prompt, with the temp path leaked into model context and the prompt
+# sitting on disk (agent-readable) for the whole run.
 PROMPT_ARG_MAX = int(os.environ.get("PROMPT_ARG_MAX", "100000"))
 
 
 def run_pass(wt: str, model: str, system: str, user: str) -> PassResult:
-    # Guard is deliberately prompt-only: the system prompt (--append-system-prompt)
-    # is operator-curated guidance, small by construction — only the diff-bearing
-    # user prompt scales with PR size.
-    prompt_file = None
-    prompt_arg = user
-    try:
-        if len(user.encode("utf-8", errors="replace")) > PROMPT_ARG_MAX:
-            fd, prompt_file = tempfile.mkstemp(prefix="second-opinion-prompt-", suffix=".md")
-            # encoding pinned to match the byte-count guard above, locale-independent
-            with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
-                fh.write(user)
-            prompt_arg = f"@{prompt_file}"
-        return _run_pass_argv(wt, model, system, prompt_arg)
-    finally:
-        if prompt_file is not None:
-            try:
-                os.unlink(prompt_file)
-            except OSError:
-                pass
+    if len(system.encode("utf-8", errors="replace")) > PROMPT_ARG_MAX:
+        # Operator-supplied GUIDANCE/GUIDANCE_FILE is unbounded and rides argv via
+        # --append-system-prompt, so it can independently trip the same E2BIG.
+        # Deliberately not clipped (silently truncating guidance would change review
+        # behavior) and not rerouted (stdin already carries the user prompt): fail
+        # the pass legibly through the normal degraded machinery instead of letting
+        # execve die with an opaque OSError.
+        log(f"system prompt exceeds PROMPT_ARG_MAX ({len(system)} chars) — refusing pass")
+        _annotate("error",
+                  "system prompt (GUIDANCE) exceeds PROMPT_ARG_MAX — trim the guidance file")
+        return PassResult("", "error")
+    if len(user.encode("utf-8", errors="replace")) > PROMPT_ARG_MAX:
+        return _run_pass_argv(wt, model, system, prompt_arg=None, stdin_input=user)
+    return _run_pass_argv(wt, model, system, prompt_arg=user)
 
 
-def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str) -> PassResult:
+def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
+                   stdin_input: str | None = None) -> PassResult:
     cmd = (["pi", "--provider", PI_PROVIDER, "--model", model] + PI_FLAGS
-           + ["--tools", TOOLS, "--append-system-prompt", system, "-p", prompt_arg])
+           + ["--tools", TOOLS, "--append-system-prompt", system, "-p"])
+    if prompt_arg is not None:
+        cmd.append(prompt_arg)
     # Defense-in-depth: don't hand the agent's shell the GitHub token. pi reaches the
     # provider via the key in models.json; GH_TOKEN/GITHUB_TOKEN are for _gh() only, so
     # drop them here — a bash-tool prompt-injection can't exfiltrate the token that posts
@@ -299,8 +302,10 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str) -> PassRes
     # the checkout token. Trusting PR authors is the real boundary; see README Security.)
     env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
     try:
+        # input=None keeps today's inherited-stdin behavior for the inline path;
+        # a str pipes it (non-TTY), which pi reads as the verbatim initial prompt.
         p = subprocess.run(cmd, cwd=wt, capture_output=True, text=True,
-                           timeout=PASS_TIMEOUT_S, env=env)
+                           timeout=PASS_TIMEOUT_S, env=env, input=stdin_input)
     except subprocess.TimeoutExpired:
         log(f"pi pass timed out after {PASS_TIMEOUT_S}s")
         _annotate("warning", f"pi pass timed out after {PASS_TIMEOUT_S}s — no review produced")

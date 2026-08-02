@@ -13,9 +13,15 @@ All notable changes to this project are documented here. The format follows
   128 KiB (`MAX_ARG_STRLEN`); the diff-bearing user prompt was passed to `pi` inline as
   one argv element, so any sufficiently large PR failed deterministically before the
   review even started (observed on spaghettio#569, a 163 KB diff). Prompts above a
-  conservative `PROMPT_ARG_MAX` (env-tunable, default 100000 bytes) are now written to a
-  private tempfile and handed to `pi` via its `@file` prompt syntax; smaller prompts keep
-  the byte-identical inline invocation. The tempfile is unlinked even on timeout/error.
+  conservative `PROMPT_ARG_MAX` (env-tunable, default 100000 bytes) are now **piped to
+  `pi` via stdin**, which pi uses verbatim as the initial prompt — the model sees the
+  same bytes as the inline path (pi's `@file` syntax was rejected for this: it wraps
+  content in `<file>` markup, changing the prompt shape and leaking a temp path into
+  model context). Smaller prompts keep the byte-identical inline invocation.
+- An **oversized system prompt** (unbounded operator `GUIDANCE`/`GUIDANCE_FILE`, which
+  rides argv via `--append-system-prompt`) now fails the pass legibly through the normal
+  degraded-pass machinery (error annotation naming the cause) instead of the same opaque
+  E2BIG crash. Guidance is deliberately never clipped.
 
 ## [1.2.0] - 2026-07-04
 
