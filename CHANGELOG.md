@@ -66,7 +66,8 @@ All notable changes to this project are documented here. The format follows
   - Per-project guidance file (the reviewer's "memory"), HTML-marker idempotency (no database),
     and decorrelated, advisory-never-a-gate framing.
 
-[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/storkme/second-opinion/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/storkme/second-opinion/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/storkme/second-opinion/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/storkme/second-opinion/releases/tag/v1.0.0

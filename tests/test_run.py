@@ -135,13 +135,6 @@ def test_already_reviewed_matches_marker_at_start_only():
     assert "startswith" in seen["jq"] and "abc123" in seen["jq"]
 
 
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("PASS", name)
-
-
 def test_run_pass_small_prompt_stays_inline_argv():
     # Below PROMPT_ARG_MAX the invocation must be byte-identical to the historical
     # one: the prompt itself as the argv element after -p, no temp file involved.
@@ -192,3 +185,12 @@ def test_run_pass_oversized_prompt_cleans_up_on_timeout_too():
     res = run.run_pass("/wt", "m", "sys", big)
     assert res.status == "timeout"
     assert not os.path.exists(seen["path"]), "tempfile must be unlinked even on timeout"
+
+# Keep this LAST: it iterates globals() at execution time, so any test defined
+# below it would be silently skipped by the `python -m tests.test_run` runner
+# (found by PR #18's own review bots — the appended tests were being skipped).
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_"):
+            fn()
+            print("PASS", name)

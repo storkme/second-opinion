@@ -267,14 +267,18 @@ PROMPT_ARG_MAX = int(os.environ.get("PROMPT_ARG_MAX", "100000"))
 
 
 def run_pass(wt: str, model: str, system: str, user: str) -> PassResult:
+    # Guard is deliberately prompt-only: the system prompt (--append-system-prompt)
+    # is operator-curated guidance, small by construction — only the diff-bearing
+    # user prompt scales with PR size.
     prompt_file = None
     prompt_arg = user
-    if len(user.encode("utf-8", errors="replace")) > PROMPT_ARG_MAX:
-        fd, prompt_file = tempfile.mkstemp(prefix="second-opinion-prompt-", suffix=".md")
-        with os.fdopen(fd, "w") as fh:
-            fh.write(user)
-        prompt_arg = f"@{prompt_file}"
     try:
+        if len(user.encode("utf-8", errors="replace")) > PROMPT_ARG_MAX:
+            fd, prompt_file = tempfile.mkstemp(prefix="second-opinion-prompt-", suffix=".md")
+            # encoding pinned to match the byte-count guard above, locale-independent
+            with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
+                fh.write(user)
+            prompt_arg = f"@{prompt_file}"
         return _run_pass_argv(wt, model, system, prompt_arg)
     finally:
         if prompt_file is not None:
