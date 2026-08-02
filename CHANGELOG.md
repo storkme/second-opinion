@@ -5,6 +5,18 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [1.2.1] - 2026-08-02
+
+### Fixed
+- Review passes on PRs with **large diffs (>100 KB prompt)** no longer crash with
+  `[Errno 7] Argument list too long: 'pi'`. Linux caps a single `execve()` argument at
+  128 KiB (`MAX_ARG_STRLEN`); the diff-bearing user prompt was passed to `pi` inline as
+  one argv element, so any sufficiently large PR failed deterministically before the
+  review even started (observed on spaghettio#569, a 163 KB diff). Prompts above a
+  conservative `PROMPT_ARG_MAX` (env-tunable, default 100000 bytes) are now written to a
+  private tempfile and handed to `pi` via its `@file` prompt syntax; smaller prompts keep
+  the byte-identical inline invocation. The tempfile is unlinked even on timeout/error.
+
 ## [1.2.0] - 2026-07-04
 
 ### Fixed

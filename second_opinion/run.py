@@ -257,9 +257,36 @@ class ReviewOutcome(NamedTuple):
     degraded: bool
 
 
+# Linux caps a single execve() argument at 128 KiB (MAX_ARG_STRLEN). A large PR's
+# diff-bearing prompt blows past that and the pass dies with E2BIG ("[Errno 7]
+# Argument list too long") before pi even starts — a hard fail unrelated to the
+# review itself. Above this conservative threshold the prompt goes to pi via its
+# @file syntax instead of argv; below it, the argv invocation is byte-identical
+# to what it always was.
+PROMPT_ARG_MAX = int(os.environ.get("PROMPT_ARG_MAX", "100000"))
+
+
 def run_pass(wt: str, model: str, system: str, user: str) -> PassResult:
+    prompt_file = None
+    prompt_arg = user
+    if len(user.encode("utf-8", errors="replace")) > PROMPT_ARG_MAX:
+        fd, prompt_file = tempfile.mkstemp(prefix="second-opinion-prompt-", suffix=".md")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(user)
+        prompt_arg = f"@{prompt_file}"
+    try:
+        return _run_pass_argv(wt, model, system, prompt_arg)
+    finally:
+        if prompt_file is not None:
+            try:
+                os.unlink(prompt_file)
+            except OSError:
+                pass
+
+
+def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str) -> PassResult:
     cmd = (["pi", "--provider", PI_PROVIDER, "--model", model] + PI_FLAGS
-           + ["--tools", TOOLS, "--append-system-prompt", system, "-p", user])
+           + ["--tools", TOOLS, "--append-system-prompt", system, "-p", prompt_arg])
     # Defense-in-depth: don't hand the agent's shell the GitHub token. pi reaches the
     # provider via the key in models.json; GH_TOKEN/GITHUB_TOKEN are for _gh() only, so
     # drop them here — a bash-tool prompt-injection can't exfiltrate the token that posts

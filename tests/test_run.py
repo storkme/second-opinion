@@ -140,3 +140,55 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("PASS", name)
+
+
+def test_run_pass_small_prompt_stays_inline_argv():
+    # Below PROMPT_ARG_MAX the invocation must be byte-identical to the historical
+    # one: the prompt itself as the argv element after -p, no temp file involved.
+    captured = {}
+
+    def capture(cmd, **k):
+        captured["cmd"] = cmd
+        return FakeProc(0, stdout="ok")
+
+    run.subprocess.run = capture
+    res = run.run_pass("/wt", "m", "sys", "small prompt")
+    assert res.status == "ok"
+    assert captured["cmd"][-2:] == ["-p", "small prompt"]
+
+
+def test_run_pass_oversized_prompt_goes_via_at_file_and_cleans_up():
+    # Above PROMPT_ARG_MAX (Linux MAX_ARG_STRLEN guard) the prompt must reach pi as
+    # @<tempfile> whose CONTENT is the prompt, and the tempfile must be gone after.
+    big = "x" * (run.PROMPT_ARG_MAX + 1)
+    captured = {}
+
+    def capture(cmd, **k):
+        arg = cmd[-1]
+        assert arg.startswith("@"), f"expected @file arg, got inline ({len(arg)} chars)"
+        path = arg[1:]
+        with open(path) as fh:
+            captured["content"] = fh.read()
+        captured["path"] = path
+        return FakeProc(0, stdout="ok")
+
+    run.subprocess.run = capture
+    res = run.run_pass("/wt", "m", "sys", big)
+    assert res.status == "ok"
+    assert captured["content"] == big
+    assert not os.path.exists(captured["path"]), "prompt tempfile must be unlinked"
+
+
+def test_run_pass_oversized_prompt_cleans_up_on_timeout_too():
+    big = "y" * (run.PROMPT_ARG_MAX + 1)
+    seen = {}
+
+    def boom(cmd, **k):
+        seen["path"] = cmd[-1][1:]
+        raise run.subprocess.TimeoutExpired(cmd="pi", timeout=run.PASS_TIMEOUT_S)
+
+    run.subprocess.run = boom
+    _capture_annotations()
+    res = run.run_pass("/wt", "m", "sys", big)
+    assert res.status == "timeout"
+    assert not os.path.exists(seen["path"]), "tempfile must be unlinked even on timeout"
