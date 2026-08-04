@@ -41,7 +41,7 @@ being *decorrelated* from them: a genuinely independent second pair of eyes, not
 
 ## Invariants (do not break these)
 
-- **pi is the runner.** Agentic passes run via [`@mariozechner/pi-coding-agent`](https://www.npmjs.com/package/@mariozechner/pi-coding-agent)
+- **pi is the runner.** Agentic passes run via [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
   (`pi --provider … --model …`). Nothing else drives the model for the review passes.
 - **Idempotency is an HTML marker comment on the PR** — `<!-- second-opinion sha={sha} -->`
   as the first line of the posted comment. No database, no state files. Safe on ephemeral
@@ -114,7 +114,7 @@ agentic path never used.
 | `LLAMA_SERVER_URL` | — | required when review or merge provider is `local` |
 | `MODEL` | `DEFAULT_MODEL` (`z-ai/glm-5.2`) | OpenRouter model id (local: auto-discovered) |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api` | |
-| `K` | provider-aware: `1` openrouter, `3` local | agentic passes to union; `K=1` skips the merge |
+| `K` | provider-aware: `1` openrouter, `3` local | agentic passes to union; `K=1` skips the merge. For `K>1` on **openrouter** the passes run **in parallel** (one pi subprocess each) to collapse `K×timeout` wall-clock; **local** stays sequential (a single GPU serves one request at a time). |
 | `MERGE_PROVIDER` | = `PROVIDER` | union-merge backend: `openrouter` \| `local` |
 | `MERGE_MODEL` | = review model | model for the `K>1` merge |
 | `PROJECT` | `"this"` / repo name | injected into the prompt |
@@ -122,8 +122,10 @@ agentic path never used.
 | `EXCLUDE_GLOBS` | sensible set | comma-separated globs dropped from the diff |
 | `MAX_DIFF_CHARS` | `60000` | diff size cap (whole-file boundaries) |
 | `PASS_TIMEOUT_S` | `900` | per-pass timeout |
+| `PI_SESSION_DIR` | — | when set, pi writes each pass's JSONL session transcript here instead of ephemeral `--no-session`. Point it at a path the consumer persists (e.g. upload as an artifact) so a blocked/empty pass is forensically inspectable. |
 | `TOOLS` | `read,bash` | pi tool grant; `read` drops shell (safer on untrusted authors) |
 | `PI_REASONING` | `true` | honored for **both** providers; set `false` for a non-reasoning model |
+| `PI_MAX_TOKENS` | `65536` openrouter / `32768` local | max completion tokens for a review pass (blank/empty → provider-aware default). OpenRouter defaults to the model cap — deepseek-v4-flash-0731 caps at 65536; the old 32768 could burn a reasoning model's whole budget in the reasoning channel and return an empty 200 (spaghettio #574, #565/#566). Local llama keeps 32768. Override via `max-tokens` action input / env. |
 | `FAIL_ON_DEGRADED` | `true` | exit `2` when a degraded pass (timeout / non-zero pi exit / empty output / failed head-checkout) posts no review; `false` restores always-green |
 | `REPO_DIR` | cwd | the target repo checkout |
 
@@ -165,6 +167,15 @@ whose PR authors you trust; the example workflow's `head.repo == repo` fork guar
 forks but not a compromised same-repo author; set `TOOLS=read` to drop shell at some recall
 cost; use a low-limit OpenRouter key. `run.py` strips `GITHUB_TOKEN`/`GH_TOKEN` from the pi
 subprocess as defense-in-depth (they're only needed by the `gh`/`git` calls in the parent).
+
+**Transcripts are persisted and redacted.** Every pass writes a JSONL session transcript
+(throwaway temp dir by default; `PI_SESSION_DIR` when set). Persisted transcripts are
+auto-redacted (the `OPENROUTER_API_KEY` value, any `sk-or-v1-…` token, and
+`GITHUB_TOKEN`/`GH_TOKEN` are scrubbed before the file is kept). Do not point `session-dir`
+at an artifact that lands on a **public** repo you don't fully trust — redaction runs after
+the pass, so an injected agent can still echo the key into a tool result at runtime, and a
+durable public artifact is a much larger exposure than an ephemeral runner. Prefer
+private/expiring artifacts on public repos, or omit `session-dir` there.
 
 ## Changelog & releases
 

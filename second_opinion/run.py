@@ -42,9 +42,13 @@ Usage: run.py [--pr N] [--dry-run] [--force] [--watch [--interval S]]
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
+import math
 import os
+import re
 import subprocess
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -77,7 +81,7 @@ MAX_DIFF_CHARS = int(os.environ.get("MAX_DIFF_CHARS", "").strip() or "60000")
 _pt = os.environ.get("PASS_TIMEOUT_S", "").strip()
 PASS_TIMEOUT_S = int(_pt) if _pt else (900 if PROVIDER == "openrouter" else 1800)
 REPO_DIR = os.environ.get("REPO_DIR", "").strip() or os.getcwd()
-PI_FLAGS = ["--no-session", "--no-extensions", "--no-skills", "--no-themes",
+PI_FLAGS = ["--no-extensions", "--no-skills", "--no-themes",
             "--no-prompt-templates"]
 # Agent tool grant. `read,bash` lets it grep for callers/tests (best recall); set
 # TOOLS=read to drop shell access on repos with untrusted PR authors. bash is NOT
@@ -89,6 +93,7 @@ TOOLS = os.environ.get("TOOLS", "").strip() or "read,bash"
 FAIL_ON_DEGRADED = (os.environ.get("FAIL_ON_DEGRADED", "true").strip().lower()
                     in ("1", "true", "yes", "on"))
 MARKER = "<!-- second-opinion sha={sha} -->"
+FAIL_MARKER = "<!-- second-opinion-failed sha={sha} -->"
 
 MERGE_PROMPT = """\
 You are merging K independent reviews of the SAME pull-request diff into one comment.
@@ -137,6 +142,11 @@ def _annotate(level: str, msg: str) -> None:
     # per actions/toolkit escapeData) or a literal "%25" in pi's stderr renders as "%".
     msg = msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
     print(f"::{level} title=second-opinion::{msg}", flush=True)
+
+
+def _peek(out: str | None, limit: int = 200) -> str:
+    """Collapse whitespace and truncate a subprocess\'s partial output for a log/annotation, so a blocked pass carries a forensic tail instead of a silent black box."""
+    return " ".join((out or "").split())[:limit]
 
 
 def _should_fail(posted: bool, degraded: bool) -> bool:
@@ -245,6 +255,8 @@ class PassResult(NamedTuple):
     prompt never legitimately yields nothing)."""
     text: str
     status: str
+    cost: float = 0.0
+    tokens: int = 0
 
 
 DEGRADED = {"timeout", "error", "empty"}
@@ -271,7 +283,7 @@ class ReviewOutcome(NamedTuple):
 PROMPT_ARG_MAX = int(os.environ.get("PROMPT_ARG_MAX", "100000"))
 
 
-def run_pass(wt: str, model: str, system: str, user: str) -> PassResult:
+def run_pass(wt: str, model: str, system: str, user: str, session_dir: str | None = None) -> PassResult:
     if len(system.encode("utf-8", errors="replace")) > PROMPT_ARG_MAX:
         # Operator-supplied GUIDANCE/GUIDANCE_FILE is unbounded and rides argv via
         # --append-system-prompt, so it can independently trip the same E2BIG.
@@ -284,13 +296,234 @@ def run_pass(wt: str, model: str, system: str, user: str) -> PassResult:
                   "system prompt (GUIDANCE) exceeds PROMPT_ARG_MAX — trim the guidance file")
         return PassResult("", "error")
     if len(user.encode("utf-8", errors="replace")) > PROMPT_ARG_MAX:
-        return _run_pass_argv(wt, model, system, prompt_arg=None, stdin_input=user)
-    return _run_pass_argv(wt, model, system, prompt_arg=user)
+        return _run_pass_argv(wt, model, system, prompt_arg=None, stdin_input=user,
+                              session_dir=session_dir)
+    return _run_pass_argv(wt, model, system, prompt_arg=user, session_dir=session_dir)
+
+
+_PRICE_CACHE: dict = {}
+
+
+def _model_prices(model: str) -> dict | None:
+    """Per-token OpenRouter list prices {in,out,cache_read,cache_write}, fetched once and
+    cached. Returns None if the lookup fails — callers then report tokens only."""
+    if model in _PRICE_CACHE:
+        return _PRICE_CACHE[model]
+    if PROVIDER == "local":
+        # Keep PROVIDER=local fully offline (repo invariant): never hit a cloud pricing
+        # endpoint. Local inference is free anyway.
+        _PRICE_CACHE[model] = None
+        return None
+    prices = None
+    fetched_ok = False
+    try:
+        base = (os.environ.get("OPENROUTER_BASE_URL", "").strip().rstrip("/")
+                or "https://openrouter.ai/api")
+        key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        resp = requests.get(f"{base}/v1/models", headers=headers, timeout=15)
+        resp.raise_for_status()
+        fetched_ok = True
+        for m in resp.json().get("data", []):
+            if m.get("id") == model:
+                p = m.get("pricing") or {}
+                prices = {
+                    "in": float(p.get("prompt") or 0),
+                    "out": float(p.get("completion") or 0),
+                    "cache_read": float(p.get("input_cache_read") or 0),
+                    "cache_write": float(p.get("input_cache_write") or 0),
+                }
+                break
+    except Exception:
+        fetched_ok = False
+    if fetched_ok:
+        # Cache a genuine lookup result (including a "no price" → None). A transient fetch
+        # failure is left uncached so the long-lived daemon retries next sweep instead of
+        # silently dropping USD cost reporting for its whole lifetime.
+        _PRICE_CACHE[model] = prices
+    return prices
+
+
+def _cost_from_usage(model: str, usage: dict) -> float:
+    """Estimate USD from real pi-session token counts × OpenRouter list pricing. Returns 0
+    when pricing is unavailable (merge cost, from OpenRouter's own usage.cost, is authoritative)."""
+    prices = _model_prices(model)
+    if not prices:
+        return 0.0
+    return (usage.get("input", 0) * prices["in"]
+            + usage.get("output", 0) * prices["out"]
+            + usage.get("cache_read", 0) * prices["cache_read"]
+            + usage.get("cache_write", 0) * prices["cache_write"])
+
+
+def _list_session_files(session_dir: str) -> set:
+    """Absolute paths of the session JSONL files currently in a dir."""
+    if not session_dir or not os.path.isdir(session_dir):
+        return set()
+    out = set()
+    for root, _dirs, files in os.walk(session_dir):
+        for fn in files:
+            if fn.endswith(".jsonl"):
+                out.add(os.path.join(root, fn))
+    return out
+
+
+_REDACTED = "[REDACTED]"
+_REDACT_RE = re.compile(r"sk-or-v1-[A-Za-z0-9_-]+")
+
+
+def _secret_values() -> list:
+    vals = [os.environ.get(k, "").strip() for k in ("OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN")]
+    return [v for v in vals if v]
+
+
+def _redact_text(text: str) -> str:
+    """Scrub known secret values (and any OpenRouter key shape) from a transcript before it
+    is persisted, so a key that an injected agent echoed into a tool result can't be stored."""
+    out = text
+    for v in _secret_values():
+        out = out.replace(v, _REDACTED)
+    return _REDACT_RE.sub(_REDACTED, out)
+
+
+def _redact_transcripts(session_dir: str) -> None:
+    """Rewrite persisted session files in-place, redacting secrets."""
+    if not session_dir or not os.path.isdir(session_dir):
+        return
+    for fp in _list_session_files(session_dir):
+        try:
+            with open(fp, encoding="utf-8") as f:
+                data = f.read()
+        except OSError:
+            continue
+        clean = _redact_text(data)
+        if clean != data:
+            try:
+                with open(fp, "w", encoding="utf-8") as f:
+                    f.write(clean)
+            except OSError:
+                continue
+
+
+def _int_or_zero(value: object) -> int:
+    """Best-effort numeric parsing for provider/session usage metadata."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _float_or_zero(value: object) -> float:
+    """Best-effort finite float parsing for provider/session usage metadata."""
+    try:
+        parsed = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return parsed if math.isfinite(parsed) else 0.0
+
+
+def _read_session_usage(session_dir: str, exclude: set = ()) -> dict:
+    """Sum real token usage across the pi session JSONL file(s) in a dir, skipping files
+    already present before the pass began (so a pass shares a persisted dir without
+    absorbing the cumulative usage of earlier passes).
+
+    pi's session `Usage` uses camelCase keys (`cacheRead`/`cacheWrite`/`totalTokens`);
+    these are normalized to snake_case. The authoritative per-message `totalTokens` and
+    `cost.total` values are summed when present. Component token counts remain available
+    for cost estimation, and are the total-token fallback for older transcripts."""
+    total = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
+             "total_tokens": 0, "cost_total": 0.0}
+    if not session_dir or not os.path.isdir(session_dir):
+        return total
+    for root, _dirs, files in os.walk(session_dir):
+        for fn in files:
+            fp = os.path.join(root, fn)
+            if not fn.endswith(".jsonl") or fp in exclude:
+                continue
+            try:
+                with open(fp, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        entry = json.loads(line)
+                        usage = (entry.get("message") or {}).get("usage")
+                        if not isinstance(usage, dict):
+                            continue
+                        input_tokens = _int_or_zero(usage.get("input"))
+                        output_tokens = _int_or_zero(usage.get("output"))
+                        cache_read = _int_or_zero(usage.get("cacheRead")
+                                                  or usage.get("cache_read"))
+                        cache_write = _int_or_zero(usage.get("cacheWrite")
+                                                   or usage.get("cache_write"))
+                        total["input"] += input_tokens
+                        total["output"] += output_tokens
+                        total["cache_read"] += cache_read
+                        total["cache_write"] += cache_write
+                        raw_total = usage.get("totalTokens")
+                        if raw_total is None:
+                            raw_total = usage.get("total_tokens")
+                        if raw_total is None:
+                            total["total_tokens"] += (input_tokens + output_tokens
+                                                       + cache_read + cache_write)
+                        else:
+                            total["total_tokens"] += _int_or_zero(raw_total)
+                        cost = usage.get("cost")
+                        if isinstance(cost, dict):
+                            total["cost_total"] += _float_or_zero(cost.get("total"))
+            except (OSError, ValueError):
+                continue
+    return total
+
+
+def _finish_pass(model: str, session_dir: str, internal: bool, text: str, status: str,
+                 prior_files: set = ()) -> PassResult:
+    """Read the pass's real usage, compute cost, scrub the throwaway session dir if internal,
+    and package the PassResult with cost/tokens. `prior_files` = session files that already
+    existed before this pass, excluded so a shared persisted dir isn't double-counted."""
+    usage = _read_session_usage(session_dir, exclude=prior_files)
+    if internal:
+        shutil.rmtree(session_dir, ignore_errors=True)
+    else:
+        # Persisted transcript: scrub secrets before the consumer uploads it as an artifact.
+        _redact_transcripts(session_dir)
+    tokens = usage.get("total_tokens", 0)
+    cost = usage.get("cost_total", 0.0)
+    if cost <= 0:
+        # pi may not price a custom OpenRouter model (cost.total is 0); fall back to a
+        # list-price estimate from real token counts.
+        cost = _cost_from_usage(model, usage)
+    return PassResult(text, status, cost=cost, tokens=tokens)
 
 
 def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
-                   stdin_input: str | None = None) -> PassResult:
-    cmd = (["pi", "--provider", PI_PROVIDER, "--model", model] + PI_FLAGS
+                   stdin_input: str | None = None, session_dir: str | None = None) -> PassResult:
+    flags = list(PI_FLAGS)
+    internal = False
+    if session_dir:
+        # Caller-supplied per-pass session dir (e.g. a pass-N dir under PI_SESSION_DIR for
+        # parallel passes) — persisted, never cleaned up here.
+        session_dir = os.path.abspath(session_dir)
+        os.makedirs(session_dir, exist_ok=True)
+        flags += ["--session-dir", session_dir]
+    else:
+        session_dir = os.environ.get("PI_SESSION_DIR", "").strip()
+        if session_dir:
+            # pi runs with cwd=wt below, while this process creates/reads the transcript dir
+            # from its own cwd. Normalize once so a relative PI_SESSION_DIR names the same
+            # directory for both processes and survives removal of the temporary worktree.
+            session_dir = os.path.abspath(session_dir)
+            os.makedirs(session_dir, exist_ok=True)
+            flags += ["--session-dir", session_dir]
+        else:
+            # Always write a session (to a throwaway dir) so the pass's real token usage/cost
+            # is readable and the transcript is recoverable on a crash; scrubbed afterward
+            # when not persisted. Transcripts are kept for replay only when PI_SESSION_DIR
+            # points where the consumer persists them (e.g. an action artifact).
+            internal = True
+            session_dir = tempfile.mkdtemp(prefix="so-session-")
+            flags += ["--session-dir", session_dir]
+    cmd = (["pi", "--provider", PI_PROVIDER, "--model", model] + flags
            + ["--tools", TOOLS, "--append-system-prompt", system, "-p"])
     if prompt_arg is not None:
         cmd.append(prompt_arg)
@@ -301,15 +534,21 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
     # models.json — chmod 600'd by providers.py — and the worktree's git config can hold
     # the checkout token. Trusting PR authors is the real boundary; see README Security.)
     env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+    prior_files = _list_session_files(session_dir)
     try:
         # input=None keeps today's inherited-stdin behavior for the inline path;
         # a str pipes it (non-TTY), which pi reads as the verbatim initial prompt.
         p = subprocess.run(cmd, cwd=wt, capture_output=True, text=True,
                            timeout=PASS_TIMEOUT_S, env=env, input=stdin_input)
-    except subprocess.TimeoutExpired:
-        log(f"pi pass timed out after {PASS_TIMEOUT_S}s")
-        _annotate("warning", f"pi pass timed out after {PASS_TIMEOUT_S}s — no review produced")
-        return PassResult("", "timeout")
+    except subprocess.TimeoutExpired as e:
+        # The exception carries the partial output captured before the kill (stdout in
+        # `output`, stderr in `stderr`) — surface it so a blocked pass is diagnosable
+        # from the log, not a silent black box.
+        tail = _peek(e.stderr or e.output or "")
+        note = f" — partial output: {tail}" if tail else ""
+        log(f"pi pass timed out after {PASS_TIMEOUT_S}s{note}")
+        _annotate("warning", f"pi pass timed out after {PASS_TIMEOUT_S}s — no review produced{note}")
+        return _finish_pass(model, session_dir, internal, "", "timeout", prior_files)
     if p.returncode != 0:
         # Surface the failure (bad key, 402 out-of-credits, unknown model id, server
         # 4xx/OOM) instead of leaving only a "0c" line. Partial stdout from a crash isn't
@@ -317,18 +556,21 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
         detail = " ".join((p.stderr or p.stdout or "").split())[:200]
         log(f"pi pass exited {p.returncode}: {detail}")
         _annotate("error", f"pi exited {p.returncode} — {detail[:150]}")
-        return PassResult("", "error")
+        return _finish_pass(model, session_dir, internal, "", "error", prior_files)
     text = (p.stdout or "").strip()
     if not text:
         # Exit 0 with nothing to say: the model returned no review at all. Treat as a
-        # degraded pass, not a clean bill of health.
-        log("pi pass exited 0 but produced no review output")
-        _annotate("warning", "pass completed but produced no review output")
-        return PassResult("", "empty")
-    return PassResult(text, "ok")
+        # degraded pass, not a clean bill of health. A silent pass can still carry a tale
+        # in stderr (a provider warning, an empty assistant message pi relayed) — surface
+        # it so the failure isn't a black box.
+        note = f" — stderr: {_peek(p.stderr)}" if (p.stderr or "").strip() else ""
+        log(f"pi pass exited 0 but produced no review output{note}")
+        _annotate("warning", f"pass completed but produced no review output{note}")
+        return _finish_pass(model, session_dir, internal, "", "empty", prior_files)
+    return _finish_pass(model, session_dir, internal, text, "ok", prior_files)
 
 
-def _chat(base_url: str, api_key: str, model: str, prompt: str) -> str:
+def _chat(base_url: str, api_key: str, model: str, prompt: str, meta: dict | None = None) -> str:
     """One non-agentic chat completion (used by the K>1 merge). Defensive parse: returns
     "" on any malformed-but-200 envelope (empty choices / error / moderation shape) so the
     caller raises a clean error instead of a raw KeyError/IndexError leaking out."""
@@ -352,20 +594,42 @@ def _chat(base_url: str, api_key: str, model: str, prompt: str) -> str:
         timeout=600,
     )
     r.raise_for_status()
-    choices = r.json().get("choices") or []
-    msg = (choices[0].get("message") or {}) if choices else {}
-    content = (msg.get("content") or "").strip()
+    try:
+        payload = r.json()
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    choices = payload.get("choices") or []
+    if not isinstance(choices, list):
+        choices = []
+    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    msg = choice.get("message") or {}
+    if not isinstance(msg, dict):
+        msg = {}
+    raw_content = msg.get("content")
+    content = raw_content.strip() if isinstance(raw_content, str) else ""
     if not content and choices:
         # Diagnose the empty-content-200 shape instead of failing mute:
         # finish_reason + reasoning length distinguish the reasoning-burn
         # failure mode from a genuinely empty reply.
         log(f"_chat: empty content on 200 — finish_reason="
-            f"{choices[0].get('finish_reason')!r}, "
+            f"{choice.get('finish_reason')!r}, "
             f"reasoning_len={len(msg.get('reasoning') or '')}")
+    usage = payload.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    if meta is not None:
+        meta["cost"] = _float_or_zero(usage.get("cost"))
+        meta["tokens"] = _int_or_zero(usage.get("total_tokens"))
+        ctd = usage.get("completion_tokens_details") or {}
+        if not isinstance(ctd, dict):
+            ctd = {}
+        meta["reasoning_tokens"] = _int_or_zero(ctd.get("reasoning_tokens"))
     return content
 
 
-def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | None = None) -> str:
+def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | None = None, meta: dict | None = None) -> str:
     """Union the K passes via one merge call (only used when K>1)."""
     merge_model = merge_model or MERGE_MODEL or MODEL
     passes_block = "\n\n".join(
@@ -373,13 +637,91 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
         for i, p in enumerate(passes))
     prompt = MERGE_PROMPT.format(pr=pr, title=title, passes_block=passes_block)
     if MERGE_PROVIDER == "local":
-        out = _chat(LLAMA_SERVER_URL, "", merge_model, prompt)
+        out = _chat(LLAMA_SERVER_URL, "", merge_model, prompt, meta)
     else:
         key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-        out = _chat(OPENROUTER_BASE, key, merge_model, prompt)
+        out = _chat(OPENROUTER_BASE, key, merge_model, prompt, meta)
     if not out:
         raise RuntimeError(f"merge ({MERGE_PROVIDER}/{merge_model}) returned no usable content")
     return out
+
+
+def _cost_footer(total_cost: float, tokens: int, estimated: bool) -> str:
+    """Append a cost/token line to a posted review, or '' when nothing was spent."""
+    if total_cost <= 0 and tokens <= 0:
+        return ""
+    cost_bit = ""
+    if total_cost > 0:
+        approx = "≈" if estimated else ""
+        cost_bit = f" · {approx}${total_cost:.4f}"
+    return f"\n\n---\n\n<sub>*Review cost{cost_bit} · {tokens:,} tokens total.*</sub>\n"
+
+
+def _failure_notice_text(sha: str, checkout: bool = False) -> str:
+    """Markdown for the notice posted when a review produces no output. Carries a distinct
+    FAIL_MARKER so `_already_noticed_failure` can dedup daemon sweeps without colliding with
+    the success marker (a later retry/push on a new SHA still gets a real review)."""
+    text = FAIL_MARKER.format(sha=sha) + "\n\n"
+    if checkout:
+        text += "### :warning: Second opinion — PR head could not be reviewed\n\n"
+        text += ("The PR head commit could not be checked out, so no review ran. "
+                 "This is a reviewer malfunction, not a clean bill of health.\n")
+    else:
+        text += "### :warning: Second opinion — review produced no output\n\n"
+        text += ("The review passes all came back empty (degraded): no findings were posted. "
+                 "This is a reviewer malfunction, not a clean bill of health.\n")
+    try:
+        server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+        rid = os.environ.get("GITHUB_RUN_ID", "")
+        if REPO and rid:
+            text += f"\n- **Run log + artifacts:** {server}/{REPO}/actions/runs/{rid}\n"
+    except Exception:
+        pass
+    if FAIL_ON_DEGRADED:
+        text += ("\n*In one-shot mode this malfunction fails the check so it is not mistaken "
+                 "for a passing review. Re-run the job or push a commit to retry.*\n")
+    else:
+        text += ("\n*`FAIL_ON_DEGRADED=false`, so this malfunction does not fail the check. "
+                 "Re-run the job or push a commit to retry.*\n")
+    return text
+
+
+def _already_noticed_failure(n: int, sha: str) -> bool:
+    """True if a failure notice already exists for this exact SHA (dedups daemon sweeps)."""
+    marker = FAIL_MARKER.format(sha=sha)
+    jq = f".[] | select(.body | startswith({json.dumps(marker)}))"
+    out = _gh(["api", f"repos/{REPO}/issues/{n}/comments", "--paginate", "--jq", jq], timeout_s=120)
+    return out.strip() != ""
+
+
+def _post_failure_notice(pr: int, sha: str, dry_run: bool, checkout: bool = False) -> None:
+    text = _failure_notice_text(sha, checkout)
+    if dry_run:
+        print("\n" + "=" * 72 + f"\nDRY RUN — would post failure notice to #{pr}:\n"
+              + "=" * 72 + f"\n{text}\n")
+        return
+    try:
+        already_noticed = _already_noticed_failure(pr, sha)
+    except Exception as e:  # a failed dedup read must not suppress the more important notice
+        log(f"#{pr}: could not check for an existing failure notice "
+            f"({' '.join(str(e).split())[:120]}) — attempting to post")
+        already_noticed = False
+    if already_noticed:
+        log(f"#{pr}: failure notice for {sha[:10]} already posted — skipping duplicate")
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write(text)
+        tmp = f.name
+    try:
+        _gh(["pr", "comment", str(pr), "--body-file", tmp])
+        log(f"#{pr}: posted degraded-review failure notice")
+    except Exception:
+        log(f"#{pr}: failed to post failure notice — review remains degraded")
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_run: bool) -> ReviewOutcome:
@@ -407,16 +749,48 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         detail = " ".join((add.stderr or "").split())[:120]
         log(f"#{pr}: worktree add failed @ {sha[:10]}: {detail}")
         _annotate("error", f"#{pr}: worktree add failed @ {sha[:10]} — {detail} — no review produced")
+        _post_failure_notice(pr, sha, dry_run, checkout=True)
         return ReviewOutcome(False, True)
 
     passes: list[str] = []
     degraded = False
+    total_cost = 0.0
+    total_tokens = 0
     try:
-        for i in range(K):
-            diff_use = filtered if i == 0 else rv.shuffle_inputs(filtered, i)
-            t0 = time.time()
-            result = run_pass(wt, model, system, user_turn(diff_use))
-            log(f"#{pr}: pass {i+1}/{K} — {len(result.text)}c in {time.time()-t0:.0f}s")
+        msgs = [user_turn(filtered if i == 0 else rv.shuffle_inputs(filtered, i))
+                for i in range(K)]
+        elapsed: dict = {}
+        if K > 1 and PROVIDER == "openrouter":
+            # Parallel passes — the wall-clock win for hosted providers: K pi subprocesses
+            # run at once, so K×timeout collapses to roughly one timeout. Each pass gets its
+            # own session subdir (a pass-N dir under PI_SESSION_DIR when persisting, else a
+            # throwaway temp dir) so concurrent transcripts never collide. Local llama stays
+            # sequential: a single GPU serves one request at a time, so parallelism buys
+            # nothing and could overload the server.
+            session_base = os.environ.get("PI_SESSION_DIR", "").strip()
+            pass_dirs = ([os.path.join(session_base, f"pass-{i+1}") for i in range(K)]
+                         if session_base else [None] * K)
+            started = {i: time.monotonic() for i in range(K)}
+            results: dict = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=K) as ex:
+                fut_to_i = {ex.submit(run_pass, wt, model, system, msg, sdir): i
+                            for i, (msg, sdir) in enumerate(zip(msgs, pass_dirs))}
+                for fut in concurrent.futures.as_completed(fut_to_i):
+                    i = fut_to_i[fut]
+                    results[i] = fut.result()
+                    elapsed[i] = time.monotonic() - started[i]
+            ordered = [results[i] for i in range(K)]
+        else:
+            ordered = []
+            for i, msg in enumerate(msgs):
+                t0 = time.monotonic()
+                ordered.append(run_pass(wt, model, system, msg))
+                elapsed[i] = time.monotonic() - t0
+        for i, result in enumerate(ordered):
+            total_cost += result.cost
+            total_tokens += result.tokens
+            log(f"#{pr}: pass {i+1}/{K} — {len(result.text)}c · "
+                f"{result.tokens:,} tok · ${result.cost:.4f} in {elapsed.get(i, 0):.0f}s")
             if result.status in DEGRADED:
                 degraded = True
             if result.text:
@@ -425,14 +799,27 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         _git(["worktree", "remove", "--force", wt], check=False)
 
     if not passes:
-        log(f"#{pr}: all passes empty — not posting")
-        return ReviewOutcome(False, degraded)
+        # Degraded with no output: still flag it loudly — but make the failure visible on the
+        # PR with a comment + a link to the run log/artifacts, instead of posting nothing at
+        # all. The notice is NOT a review, so the configurable degraded tripwire still applies.
+        log(f"#{pr}: all passes empty — posting failure notice")
+        _post_failure_notice(pr, sha, dry_run)
+        return ReviewOutcome(False, True)
 
     k = len(passes)
-    review_body = passes[0] if k == 1 else merge_reviews(pr, title, passes, merge_model)
+    if k == 1:
+        review_body = passes[0]
+    else:
+        mm: dict = {}
+        review_body = merge_reviews(pr, title, passes, merge_model, meta=mm)
+        total_cost += mm.get("cost", 0.0)
+        total_tokens += mm.get("tokens", 0)
     pass_label = "single pass" if k == 1 else f"union ×{k}"
     body = HEADER.format(marker=MARKER.format(sha=sha), pass_label=pass_label,
                          model=model, body=review_body)
+    # Pass-derived costs are list-price estimates (pi does not price custom OpenRouter
+    # models), so label the total as an estimate regardless of whether a pass degraded.
+    body += _cost_footer(total_cost, total_tokens, estimated=True)
     if truncated:
         body += "\n\n*(diff truncated to fit context — coverage is partial)*"
 

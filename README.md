@@ -50,13 +50,15 @@ See [`examples/second-opinion.yml`](examples/second-opinion.yml) for the fuller 
 | `github-token` | `${{ github.token }}` | needs `pull-requests: write` |
 | `pr-number` | the triggering PR | which PR to review |
 | `model` | `z-ai/glm-5.2` | OpenRouter model id for the passes |
-| `k` | `1` | agentic passes to union; `K=1` skips the merge |
+| `k` | `1` | agentic passes to union; `K=1` skips the merge. For `K>1` on OpenRouter the passes run in parallel (one pi subprocess each); local stays sequential. |
 | `merge-model` | = `model` | model for the `K>1` union merge |
 | `project` | repo name | used in the prompt |
 | `guidance-file` | — | path to this repo's review checklist (its "memory") |
 | `exclude-globs` | sensible set | comma-separated globs dropped from the diff |
 | `max-diff-chars` | `60000` | diff size cap |
+| `max-tokens` | *(provider-aware)* | max completion tokens per pass. Empty = `65536` OpenRouter (deepseek-v4-flash-0731's cap) / `32768` local. A reasoning model can exhaust a smaller budget in its reasoning channel and return an empty 200. |
 | `pass-timeout-seconds` | `900` | per-pass timeout |
+| `session-dir` | — | when set, pi writes each pass's JSONL session transcript here (instead of ephemeral `--no-session`). Point it at a path you persist — e.g. upload as an artifact — to replay a blocked/empty pass. |
 | `tools` | `read,bash` | agent tool grant; set `read` to drop shell (see Security) |
 | `reasoning` | `true` | set `false` for a non-reasoning `model` |
 | `fail-on-degraded` | `true` | fail the check when a pass degrades and posts no review ([below](#degraded-passes-fail-the-check)) |
@@ -194,6 +196,14 @@ exfiltrate secrets. So:
 - `run.py` strips `GITHUB_TOKEN`/`GH_TOKEN` from the pi subprocess as defense-in-depth, and
   `providers.py` writes `~/.pi/agent/models.json` with mode `600`. The OpenRouter key still
   lives in that file in cleartext (pi reads it from there) — use a **low-limit key**.
+- **Session transcripts are on disk and are your responsibility.** Every pass writes a JSONL
+  transcript (a throwaway temp dir by default, or `PI_SESSION_DIR` when set). Persisted
+  transcripts are **auto-redacted** — the `OPENROUTER_API_KEY` value, any `sk-or-v1-…`
+  token, and `GITHUB_TOKEN`/`GH_TOKEN` are scrubbed before the file is kept. Still, do not
+  point `session-dir` at an artifact that lands on a **public** repo you don't fully trust:
+  a prompt-injected agent could echo the key at runtime before redaction runs, and a durable
+  public artifact is a much larger exposure surface than an ephemeral runner. Prefer private/
+  expiring artifacts on public repos, or drop `session-dir` there entirely.
 - Treat the output as advisory, never a merge gate.
 
 ## Local / CLI use

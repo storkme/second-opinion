@@ -28,6 +28,17 @@ def pi_provider(provider: str) -> str:
     return "openrouter" if provider == "openrouter" else "llama"
 
 
+def _parse_max_tokens(raw: str, default: int) -> int:
+    """Parse PI_MAX_TOKENS (blank -> provider default); a non-integer is a clean SystemExit,
+    not an uncaught ValueError surfaced as a traceback on an operator-facing knob."""
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise SystemExit(f"PI_MAX_TOKENS must be an integer, got {raw!r}")
+
+
 def _reasoning() -> bool:
     # Honored for BOTH providers (carry-forward #3 — the old daemon hardcoded this true).
     # The default model (GLM 5.2) is a reasoning model; set PI_REASONING=false for a
@@ -39,7 +50,7 @@ def write_models_json(model: str) -> Path:
     """Register `model` for the active PROVIDER into models.json; return the file path."""
     provider = os.environ.get("PROVIDER", "openrouter").strip().lower()
     reasoning = _reasoning()
-    max_tokens = int(os.environ.get("PI_MAX_TOKENS", "32768"))
+    raw_max = os.environ.get("PI_MAX_TOKENS", "").strip()
 
     if provider == "local":
         base = os.environ.get("LLAMA_SERVER_URL", "").strip().rstrip("/")
@@ -47,7 +58,16 @@ def write_models_json(model: str) -> Path:
             raise SystemExit("LLAMA_SERVER_URL is required for PROVIDER=local")
         key = "not-needed"                       # llama-server ignores auth
         ctx = int(os.environ.get("PI_CONTEXT_WINDOW", "65536"))   # local servers run smaller windows
+        # Local llama-server: keep the conservative default (override via PI_MAX_TOKENS).
+        max_tokens = _parse_max_tokens(raw_max, 32768)
     else:
+        # OpenRouter: default to the model cap. deepseek-v4-flash-0731 tops out at
+        # 65536 completion tokens (per the models API); the old 32768 default let a
+        # reasoning-capable model exhaust its whole output budget in the reasoning
+        # channel and come back with an EMPTY `content` on a 200 (spaghettio #574,
+        # #565/#566). Raising it gives reasoning room to finish before emitting the
+        # review. Override via PI_MAX_TOKENS / the action's max-tokens input.
+        max_tokens = _parse_max_tokens(raw_max, 65536)
         base = (os.environ.get("OPENROUTER_BASE_URL", "").strip().rstrip("/")
                 or "https://openrouter.ai/api")
         key = os.environ.get("OPENROUTER_API_KEY", "").strip()

@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!package.json
+!package-lock.json
+!entrypoint.sh
+!second_opinion/
+!second_opinion/**

@@ -5,6 +5,69 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Security
+- The Action image no longer performs an unpinned global npm install. Its maintained pi
+  runtime is pinned exactly and installed with `npm ci` from a committed integrity-checked
+  lockfile, with dependency lifecycle scripts disabled. This also moves off the deprecated
+  `@mariozechner` package, whose final release has active security advisories, to the
+  maintained `@earendil-works` package. CI audits the locked production graph and builds the
+  image, preventing vulnerable or non-reproducible dependency updates from slipping through;
+  the Docker build context is allowlisted so repository secrets and unrelated files are not
+  sent to the builder.
+- **Persisted transcripts are auto-redacted.** Because session transcripts record the full
+  agent conversation (including `bash` tool output), a prompt-injected agent could otherwise
+  echo the OpenRouter key into one. Persisted transcripts (under `session-dir`) are now
+  scrubbed of the `OPENROUTER_API_KEY` value, any `sk-or-v1-…` token, and
+  `GITHUB_TOKEN`/`GH_TOKEN` before the file is kept. Operators should still avoid uploading
+  `session-dir` transcripts to **public** artifacts on untrusted repos (redaction runs after
+  the pass, so it is a mitigation, not a sandbox).
+
+### Fixed
+- A degraded pass is no longer a black box. The timeout branch surfaces the partial
+  stdout/stderr captured before the kill, and an exit-0-with-no-output pass surfaces any
+  stderr, so a blocked review carries a forensic tail in the log/annotation instead of a
+  bare "produced no review output" line.
+- A degraded review with **no output** now posts a comment on the PR explaining the failure
+  and linking the run log/artifacts (built from `GITHUB_RUN_ID`), instead of posting
+  nothing at all — both for the all-passes-empty case and the head-checkout-failed case.
+  The notice carries a distinct `second-opinion-failed` marker so a daemon sweep never
+  re-posts it for the same SHA (and it never collides with the success marker, so a later
+  retry/push on a new SHA still gets a real review). It is not a passing review, so the
+  `fail-on-degraded` tripwire still exits 2 and the check stays red — no silent-green.
+
+### Added
+- **Parallel K passes (hosted providers).** For `K>1` with `PROVIDER=openrouter`, the agentic
+  passes now run **concurrently** (one pi subprocess each, up to K in-flight) instead of
+  sequentially — so `K×timeout` wall-clock collapses to roughly one pass, giving much more
+  headroom against spaghettio's hard-timeout mode. Each pass gets its own session subdir (a
+  `pass-N` dir under `PI_SESSION_DIR` when persisting, else a throwaway temp dir) so
+  concurrent transcripts never collide and per-pass cost/token attribution stays correct.
+  Local llama stays sequential: a single GPU serves one request at a time, and parallelism
+  could overload the server.
+- **Real cost/token reporting.** Per-pass token counts are read from pi's session transcript,
+  normalized from pi's camelCase `Usage` schema (`cacheRead`/`cacheWrite`), and the log line
+  now shows `N tokens · $cost`; the OpenRouter **merge** call reports its authoritative
+  `usage.cost`. pi's own per-message `cost.total` is used when present; otherwise the cost is
+  estimated from real token counts × OpenRouter list prices (cached in `_model_prices`), so
+  `PROVIDER=local` stays fully offline (no cloud pricing lookup). The footer shows the **total
+  review price and token count**; because pass-derived cost is always an estimate, the footer
+  marks it `≈`. Per-pass usage is attributed correctly even when passes share a persisted
+  `session-dir` (each pass counts only its own transcript, not the cumulative usage of
+  earlier passes).
+- New `session-dir` action input (env `PI_SESSION_DIR`): when set, pi persists each pass's
+  full JSONL session transcript there (upload it as an artifact to replay a blocked/empty
+  pass). When empty, pi still writes a throwaway session internally per pass so token/cost
+  reporting works — but the transcript is scrubbed afterward rather than retained, matching
+  the old ephemeral behavior.
+- New `max-tokens` action input (env `PI_MAX_TOKENS`): max completion tokens for a pass.
+  The default is provider-aware and empty-string safe — OpenRouter `65536`
+  (deepseek-v4-flash-0731's cap) instead of the old `32768`, local stays at `32768` — so a
+  reasoning-capable model is less likely to exhaust its output budget in the reasoning
+  channel and return an empty `content` on a 200 (the same class as the #16 merge fix, seen
+  again on the agentic passes of spaghettio #574). Set a value to override.
+
 ## [1.2.1] - 2026-08-02
 
 ### Fixed
