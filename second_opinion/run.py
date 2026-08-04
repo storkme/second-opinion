@@ -315,6 +315,7 @@ def _model_prices(model: str) -> dict | None:
         _PRICE_CACHE[model] = None
         return None
     prices = None
+    fetched_ok = False
     try:
         base = (os.environ.get("OPENROUTER_BASE_URL", "").strip().rstrip("/")
                 or "https://openrouter.ai/api")
@@ -322,6 +323,7 @@ def _model_prices(model: str) -> dict | None:
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         resp = requests.get(f"{base}/v1/models", headers=headers, timeout=15)
         resp.raise_for_status()
+        fetched_ok = True
         for m in resp.json().get("data", []):
             if m.get("id") == model:
                 p = m.get("pricing") or {}
@@ -333,8 +335,12 @@ def _model_prices(model: str) -> dict | None:
                 }
                 break
     except Exception:
-        prices = None
-    _PRICE_CACHE[model] = prices
+        fetched_ok = False
+    if fetched_ok:
+        # Cache a genuine lookup result (including a "no price" → None). A transient fetch
+        # failure is left uncached so the long-lived daemon retries next sweep instead of
+        # silently dropping USD cost reporting for its whole lifetime.
+        _PRICE_CACHE[model] = prices
     return prices
 
 
@@ -666,10 +672,9 @@ def _failure_notice_text(sha: str, checkout: bool = False) -> str:
                  "This is a reviewer malfunction, not a clean bill of health.\n")
     try:
         server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
-        repo = os.environ.get("GITHUB_REPOSITORY", "")
         rid = os.environ.get("GITHUB_RUN_ID", "")
-        if repo and rid:
-            text += f"\n- **Run log + artifacts:** {server}/{repo}/actions/runs/{rid}\n"
+        if REPO and rid:
+            text += f"\n- **Run log + artifacts:** {server}/{REPO}/actions/runs/{rid}\n"
     except Exception:
         pass
     if FAIL_ON_DEGRADED:
@@ -764,20 +769,27 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
             session_base = os.environ.get("PI_SESSION_DIR", "").strip()
             pass_dirs = ([os.path.join(session_base, f"pass-{i+1}") for i in range(K)]
                          if session_base else [None] * K)
+            started = {i: time.monotonic() for i in range(K)}
             results: dict = {}
             with concurrent.futures.ThreadPoolExecutor(max_workers=K) as ex:
                 fut_to_i = {ex.submit(run_pass, wt, model, system, msg, sdir): i
                             for i, (msg, sdir) in enumerate(zip(msgs, pass_dirs))}
                 for fut in concurrent.futures.as_completed(fut_to_i):
-                    results[fut_to_i[fut]] = fut.result()
+                    i = fut_to_i[fut]
+                    results[i] = fut.result()
+                    elapsed[i] = time.monotonic() - started[i]
             ordered = [results[i] for i in range(K)]
         else:
-            ordered = [run_pass(wt, model, system, msg) for msg in msgs]
+            ordered = []
+            for i, msg in enumerate(msgs):
+                t0 = time.monotonic()
+                ordered.append(run_pass(wt, model, system, msg))
+                elapsed[i] = time.monotonic() - t0
         for i, result in enumerate(ordered):
             total_cost += result.cost
             total_tokens += result.tokens
             log(f"#{pr}: pass {i+1}/{K} — {len(result.text)}c · "
-                f"{result.tokens:,} tok · ${result.cost:.4f}")
+                f"{result.tokens:,} tok · ${result.cost:.4f} in {elapsed.get(i, 0):.0f}s")
             if result.status in DEGRADED:
                 degraded = True
             if result.text:

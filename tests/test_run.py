@@ -538,6 +538,32 @@ def test_finish_pass_redacts_persisted_transcript():
             os.environ["OPENROUTER_API_KEY"] = prev
 
 
+
+def test_model_prices_retries_after_transient_failure():
+    run._PRICE_CACHE.clear()
+    # transient network failure: not cached, so the daemon retries next sweep
+    def boom(*a, **k):
+        raise TimeoutError("provider blip")
+    run.requests.get = boom
+    assert run._model_prices("m") is None
+    assert "m" not in run._PRICE_CACHE
+    # a successful lookup (model absent from list) IS cached as None -- no price, no retry
+    run.requests.get = lambda *a, **k: _Resp({"data": [{"id": "other-model"}]})
+    assert run._model_prices("m") is None
+    assert "m" in run._PRICE_CACHE
+
+
+def test_parse_max_tokens_rejects_non_numeric_and_defaults_blank():
+    from second_opinion import providers as run_providers
+    assert run_providers._parse_max_tokens("", 65536) == 65536
+    assert run_providers._parse_max_tokens("48000", 65536) == 48000
+    try:
+        run_providers._parse_max_tokens("abc", 65536)
+        raise AssertionError("expected SystemExit for non-numeric PI_MAX_TOKENS")
+    except SystemExit as e:
+        assert "must be an integer" in str(e)
+
+
 # Keep this LAST: it iterates globals() at execution time, so any test defined
 # below it would be silently skipped by the `python -m tests.test_run` runner
 # (found by PR #18's own review bots — the appended tests were being skipped).
