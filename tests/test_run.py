@@ -244,14 +244,6 @@ def test_run_pass_oversized_system_prompt_fails_legibly_not_e2big():
     assert ann[0][0] == "error" and "GUIDANCE" in ann[0][1]
 
 
-# Keep this LAST: it iterates globals() at execution time, so any test defined
-# below it would be silently skipped by the `python -m tests.test_run` runner
-# (found by PR #18's own review bots — the appended tests were being skipped).
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("PASS", name)
 
 
 def test_run_pass_session_dir_targets_dir_and_drops_no_session():
@@ -324,7 +316,7 @@ def test_failure_notice_includes_run_url():
     os.environ["GITHUB_REPOSITORY"] = "o/r"
     os.environ["GITHUB_RUN_ID"] = "12345"
     try:
-        text = run._failure_notice_text()
+        text = run._failure_notice_text("somesha")
     finally:
         for k, v in prev.items():
             if v is None:
@@ -338,7 +330,7 @@ def test_failure_notice_omits_url_without_run():
     prev = os.environ.get("GITHUB_RUN_ID")
     os.environ.pop("GITHUB_RUN_ID", None)
     try:
-        text = run._failure_notice_text()
+        text = run._failure_notice_text("somesha")
     finally:
         if prev is not None:
             os.environ["GITHUB_RUN_ID"] = prev
@@ -360,13 +352,28 @@ def test_read_session_usage_excludes_prior_files():
         f1 = os.path.join(d, "pass1.jsonl")
         f2 = os.path.join(d, "pass2.jsonl")
         with open(f1, "w") as f:
-            f.write('{"message":{"usage":{"input":10,"output":5,"cache_read":1,"cache_write":0}}}\n')
+            f.write('{"message":{"usage":{"input":10,"output":5,"cacheRead":1,"cacheWrite":0,"cost":{"total":0.02}}}}\n')
         with open(f2, "w") as f:
-            f.write('{"message":{"usage":{"input":100,"output":50,"cache_read":4,"cache_write":0}}}\n')
+            f.write('{"message":{"usage":{"input":100,"output":50,"cacheRead":4,"cacheWrite":0,"cost":{"total":0.08}}}}\n')
         both = run._read_session_usage(d)
-        assert both["input"] == 110 and both["output"] == 55 and both["cache_read"] == 5
+        assert both["input"] == 110 and both["output"] == 55
+        assert both["cache_read"] == 5 and both["cache_write"] == 0
+        assert abs(both["cost_total"] - 0.10) < 1e-9
         second = run._read_session_usage(d, exclude={f1})
-        assert second["input"] == 100 and second["output"] == 50 and second["cache_read"] == 4
+        assert second["input"] == 100 and second["output"] == 50
+        assert second["cache_read"] == 4 and abs(second["cost_total"] - 0.08) < 1e-9
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)
+
+
+# Keep this LAST: it iterates globals() at execution time, so any test defined
+# below it would be silently skipped by the `python -m tests.test_run` runner
+# (found by PR #18's own review bots — the appended tests were being skipped).
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_"):
+            fn()
+            print("PASS", name)
+
+

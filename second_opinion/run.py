@@ -90,6 +90,7 @@ TOOLS = os.environ.get("TOOLS", "").strip() or "read,bash"
 FAIL_ON_DEGRADED = (os.environ.get("FAIL_ON_DEGRADED", "true").strip().lower()
                     in ("1", "true", "yes", "on"))
 MARKER = "<!-- second-opinion sha={sha} -->"
+FAIL_MARKER = "<!-- second-opinion-failed sha={sha} -->"
 
 MERGE_PROMPT = """\
 You are merging K independent reviews of the SAME pull-request diff into one comment.
@@ -304,6 +305,11 @@ def _model_prices(model: str) -> dict | None:
     cached. Returns None if the lookup fails — callers then report tokens only."""
     if model in _PRICE_CACHE:
         return _PRICE_CACHE[model]
+    if PROVIDER == "local":
+        # Keep PROVIDER=local fully offline (repo invariant): never hit a cloud pricing
+        # endpoint. Local inference is free anyway.
+        _PRICE_CACHE[model] = None
+        return None
     prices = None
     try:
         base = (os.environ.get("OPENROUTER_BASE_URL", "").strip().rstrip("/")
@@ -355,8 +361,12 @@ def _list_session_files(session_dir: str) -> set:
 def _read_session_usage(session_dir: str, exclude: set = ()) -> dict:
     """Sum real token usage across the pi session JSONL file(s) in a dir, skipping files
     already present before the pass began (so a pass shares a persisted dir without
-    absorbing the cumulative usage of earlier passes)."""
-    total = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+    absorbing the cumulative usage of earlier passes).
+
+    pi's session `Usage` uses camelCase keys (`cacheRead`/`cacheWrite`); these are
+    normalized to snake_case. pi's authoritative per-message `cost.total` is also summed
+    into `cost_total` when present."""
+    total = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cost_total": 0.0}
     if not session_dir or not os.path.isdir(session_dir):
         return total
     for root, _dirs, files in os.walk(session_dir):
@@ -374,8 +384,15 @@ def _read_session_usage(session_dir: str, exclude: set = ()) -> dict:
                         usage = (entry.get("message") or {}).get("usage")
                         if not isinstance(usage, dict):
                             continue
-                        for k in total:
-                            total[k] += int(usage.get(k) or 0)
+                        total["input"] += int(usage.get("input") or 0)
+                        total["output"] += int(usage.get("output") or 0)
+                        total["cache_read"] += int(usage.get("cacheRead")
+                                                   or usage.get("cache_read") or 0)
+                        total["cache_write"] += int(usage.get("cacheWrite")
+                                                    or usage.get("cache_write") or 0)
+                        cost = (usage.get("cost") or {}).get("total")
+                        if isinstance(cost, (int, float)):
+                            total["cost_total"] += float(cost)
             except (OSError, ValueError):
                 continue
     return total
@@ -389,8 +406,14 @@ def _finish_pass(model: str, session_dir: str, internal: bool, text: str, status
     usage = _read_session_usage(session_dir, exclude=prior_files)
     if internal:
         shutil.rmtree(session_dir, ignore_errors=True)
-    tokens = usage.get("input", 0) + usage.get("output", 0)
-    return PassResult(text, status, cost=_cost_from_usage(model, usage), tokens=tokens)
+    tokens = (usage.get("input", 0) + usage.get("output", 0)
+              + usage.get("cache_read", 0) + usage.get("cache_write", 0))
+    cost = usage.get("cost_total", 0.0)
+    if cost <= 0:
+        # pi may not price a custom OpenRouter model (cost.total is 0); fall back to a
+        # list-price estimate from real token counts.
+        cost = _cost_from_usage(model, usage)
+    return PassResult(text, status, cost=cost, tokens=tokens)
 
 
 def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
@@ -527,11 +550,19 @@ def _cost_footer(total_cost: float, tokens: int, estimated: bool) -> str:
     return f"\n\n---\n\n<sub>*Review cost{cost_bit} · {tokens:,} tokens total.*</sub>\n"
 
 
-def _failure_notice_text() -> str:
-    """Markdown for the notice posted when a review comes back with no output."""
-    text = ("### :warning: Second opinion — review produced no output\n\n"
-            "The review passes all came back empty (degraded): no findings were posted. "
-            "This is a reviewer malfunction, not a clean bill of health.\n")
+def _failure_notice_text(sha: str, checkout: bool = False) -> str:
+    """Markdown for the notice posted when a review produces no output. Carries a distinct
+    FAIL_MARKER so `_already_noticed_failure` can dedup daemon sweeps without colliding with
+    the success marker (a later retry/push on a new SHA still gets a real review)."""
+    text = FAIL_MARKER.format(sha=sha) + "\n\n"
+    if checkout:
+        text += "### :warning: Second opinion — PR head could not be reviewed\n\n"
+        text += ("The PR head commit could not be checked out, so no review ran. "
+                 "This is a reviewer malfunction, not a clean bill of health.\n")
+    else:
+        text += "### :warning: Second opinion — review produced no output\n\n"
+        text += ("The review passes all came back empty (degraded): no findings were posted. "
+                 "This is a reviewer malfunction, not a clean bill of health.\n")
     try:
         server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
         repo = os.environ.get("GITHUB_REPOSITORY", "")
@@ -545,11 +576,22 @@ def _failure_notice_text() -> str:
     return text
 
 
-def _post_failure_notice(pr: int, dry_run: bool) -> None:
-    text = _failure_notice_text()
+def _already_noticed_failure(n: int, sha: str) -> bool:
+    """True if a failure notice already exists for this exact SHA (dedups daemon sweeps)."""
+    marker = FAIL_MARKER.format(sha=sha)
+    jq = f".[] | select(.body | startswith({json.dumps(marker)}))"
+    out = _gh(["api", f"repos/{REPO}/issues/{n}/comments", "--paginate", "--jq", jq], timeout_s=120)
+    return out.strip() != ""
+
+
+def _post_failure_notice(pr: int, sha: str, dry_run: bool, checkout: bool = False) -> None:
+    text = _failure_notice_text(sha, checkout)
     if dry_run:
         print("\n" + "=" * 72 + f"\nDRY RUN — would post failure notice to #{pr}:\n"
               + "=" * 72 + f"\n{text}\n")
+        return
+    if _already_noticed_failure(pr, sha):
+        log(f"#{pr}: failure notice for {sha[:10]} already posted — skipping duplicate")
         return
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(text)
@@ -591,6 +633,7 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         detail = " ".join((add.stderr or "").split())[:120]
         log(f"#{pr}: worktree add failed @ {sha[:10]}: {detail}")
         _annotate("error", f"#{pr}: worktree add failed @ {sha[:10]} — {detail} — no review produced")
+        _post_failure_notice(pr, sha, dry_run, checkout=True)
         return ReviewOutcome(False, True)
 
     passes: list[str] = []
@@ -618,7 +661,7 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         # PR with a comment + a link to the run log/artifacts, instead of posting nothing at
         # all. The notice is NOT a review, so the tripwire still exits 2 (check stays red).
         log(f"#{pr}: all passes empty — posting failure notice, check stays red")
-        _post_failure_notice(pr, dry_run)
+        _post_failure_notice(pr, sha, dry_run)
         return ReviewOutcome(False, True)
 
     k = len(passes)
@@ -632,7 +675,9 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     pass_label = "single pass" if k == 1 else f"union ×{k}"
     body = HEADER.format(marker=MARKER.format(sha=sha), pass_label=pass_label,
                          model=model, body=review_body)
-    body += _cost_footer(total_cost, total_tokens, degraded)
+    # Pass-derived costs are list-price estimates (pi does not price custom OpenRouter
+    # models), so label the total as an estimate regardless of whether a pass degraded.
+    body += _cost_footer(total_cost, total_tokens, estimated=True)
     if truncated:
         body += "\n\n*(diff truncated to fit context — coverage is partial)*"
 

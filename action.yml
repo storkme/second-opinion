@@ -46,12 +46,12 @@ inputs:
     required: false
     default: "60000"
   max-tokens:
-    description: "Max completion tokens pi sends for a review pass. OpenRouter fallback is
-      65536 (deepseek-v4-flash-0731's cap); a reasoning-capable model can exhaust a smaller
-      budget in its reasoning channel and return an empty 200. Reduce only if the provider
-      or model demands it."
+    description: "Max completion tokens pi sends for a review pass. Leave empty for the
+      provider-aware default (65536 on OpenRouter = deepseek-v4-flash-0731's cap; 32768 for
+      local llama). A reasoning-capable model can exhaust a smaller budget in its reasoning
+      channel and return an empty 200. Set only to override the provider default."
     required: false
-    default: "65536"
+    default: ""
   pass-timeout-seconds:
     description: "Per-pass timeout."
     required: false
