@@ -31,6 +31,14 @@ All notable changes to this project are documented here. The format follows
   `fail-on-degraded` tripwire still exits 2 and the check stays red — no silent-green.
 
 ### Added
+- **Parallel K passes (hosted providers).** For `K>1` with `PROVIDER=openrouter`, the agentic
+  passes now run **concurrently** (one pi subprocess each, up to K in-flight) instead of
+  sequentially — so `K×timeout` wall-clock collapses to roughly one pass, giving much more
+  headroom against spaghettio's hard-timeout mode. Each pass gets its own session subdir (a
+  `pass-N` dir under `PI_SESSION_DIR` when persisting, else a throwaway temp dir) so
+  concurrent transcripts never collide and per-pass cost/token attribution stays correct.
+  Local llama stays sequential: a single GPU serves one request at a time, and parallelism
+  could overload the server.
 - **Real cost/token reporting.** Per-pass token counts are read from pi's session transcript,
   normalized from pi's camelCase `Usage` schema (`cacheRead`/`cacheWrite`), and the log line
   now shows `N tokens · $cost`; the OpenRouter **merge** call reports its authoritative

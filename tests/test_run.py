@@ -474,6 +474,26 @@ def test_read_session_usage_prefers_authoritative_total_tokens():
         shutil.rmtree(d, ignore_errors=True)
 
 
+
+def test_run_pass_uses_provided_session_dir():
+    # Parallel passes pass an explicit per-pass session dir: it must be used as-is and
+    # persisted (not scrubbed), and --no-session must not be added.
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return FakeProc(0, stdout="review ok")
+
+    run.subprocess.run = fake_run
+    d = tempfile.mkdtemp(prefix="so-provided-session-")
+    res = run.run_pass("/wt", "m", "sys", "usr", session_dir=d)
+    assert res.status == "ok"
+    assert "--session-dir" in seen["cmd"]
+    assert d in seen["cmd"]
+    assert "--no-session" not in seen["cmd"]
+    assert os.path.isdir(d)  # persisted, not scrubbed
+
+
 # Keep this LAST: it iterates globals() at execution time, so any test defined
 # below it would be silently skipped by the `python -m tests.test_run` runner
 # (found by PR #18's own review bots — the appended tests were being skipped).

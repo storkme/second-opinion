@@ -42,6 +42,7 @@ Usage: run.py [--pr N] [--dry-run] [--force] [--watch [--interval S]]
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import math
 import os
@@ -281,7 +282,7 @@ class ReviewOutcome(NamedTuple):
 PROMPT_ARG_MAX = int(os.environ.get("PROMPT_ARG_MAX", "100000"))
 
 
-def run_pass(wt: str, model: str, system: str, user: str) -> PassResult:
+def run_pass(wt: str, model: str, system: str, user: str, session_dir: str | None = None) -> PassResult:
     if len(system.encode("utf-8", errors="replace")) > PROMPT_ARG_MAX:
         # Operator-supplied GUIDANCE/GUIDANCE_FILE is unbounded and rides argv via
         # --append-system-prompt, so it can independently trip the same E2BIG.
@@ -294,8 +295,9 @@ def run_pass(wt: str, model: str, system: str, user: str) -> PassResult:
                   "system prompt (GUIDANCE) exceeds PROMPT_ARG_MAX — trim the guidance file")
         return PassResult("", "error")
     if len(user.encode("utf-8", errors="replace")) > PROMPT_ARG_MAX:
-        return _run_pass_argv(wt, model, system, prompt_arg=None, stdin_input=user)
-    return _run_pass_argv(wt, model, system, prompt_arg=user)
+        return _run_pass_argv(wt, model, system, prompt_arg=None, stdin_input=user,
+                              session_dir=session_dir)
+    return _run_pass_argv(wt, model, system, prompt_arg=user, session_dir=session_dir)
 
 
 _PRICE_CACHE: dict = {}
@@ -448,25 +450,32 @@ def _finish_pass(model: str, session_dir: str, internal: bool, text: str, status
 
 
 def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
-                   stdin_input: str | None = None) -> PassResult:
+                   stdin_input: str | None = None, session_dir: str | None = None) -> PassResult:
     flags = list(PI_FLAGS)
-    session_dir = os.environ.get("PI_SESSION_DIR", "").strip()
     internal = False
     if session_dir:
-        # pi runs with cwd=wt below, while this process creates/reads the transcript dir
-        # from its own cwd. Normalize once so a relative PI_SESSION_DIR names the same
-        # directory for both processes and survives removal of the temporary worktree.
+        # Caller-supplied per-pass session dir (e.g. a pass-N dir under PI_SESSION_DIR for
+        # parallel passes) — persisted, never cleaned up here.
         session_dir = os.path.abspath(session_dir)
         os.makedirs(session_dir, exist_ok=True)
         flags += ["--session-dir", session_dir]
     else:
-        # Always write a session (to a throwaway dir) so the pass's real token usage/cost is
-        # readable and the transcript is recoverable on a crash; scrubbed afterward when not
-        # persisted. Transcripts are kept for replay only when PI_SESSION_DIR points where
-        # the consumer persists them (e.g. an action artifact).
-        internal = True
-        session_dir = tempfile.mkdtemp(prefix="so-session-")
-        flags += ["--session-dir", session_dir]
+        session_dir = os.environ.get("PI_SESSION_DIR", "").strip()
+        if session_dir:
+            # pi runs with cwd=wt below, while this process creates/reads the transcript dir
+            # from its own cwd. Normalize once so a relative PI_SESSION_DIR names the same
+            # directory for both processes and survives removal of the temporary worktree.
+            session_dir = os.path.abspath(session_dir)
+            os.makedirs(session_dir, exist_ok=True)
+            flags += ["--session-dir", session_dir]
+        else:
+            # Always write a session (to a throwaway dir) so the pass's real token usage/cost
+            # is readable and the transcript is recoverable on a crash; scrubbed afterward
+            # when not persisted. Transcripts are kept for replay only when PI_SESSION_DIR
+            # points where the consumer persists them (e.g. an action artifact).
+            internal = True
+            session_dir = tempfile.mkdtemp(prefix="so-session-")
+            flags += ["--session-dir", session_dir]
     cmd = (["pi", "--provider", PI_PROVIDER, "--model", model] + flags
            + ["--tools", TOOLS, "--append-system-prompt", system, "-p"])
     if prompt_arg is not None:
@@ -699,17 +708,35 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
 
     passes: list[str] = []
     degraded = False
+    total_cost = 0.0
+    total_tokens = 0
     try:
-        total_cost = 0.0
-        total_tokens = 0
-        for i in range(K):
-            diff_use = filtered if i == 0 else rv.shuffle_inputs(filtered, i)
-            t0 = time.time()
-            result = run_pass(wt, model, system, user_turn(diff_use))
+        msgs = [user_turn(filtered if i == 0 else rv.shuffle_inputs(filtered, i))
+                for i in range(K)]
+        if K > 1 and PROVIDER == "openrouter":
+            # Parallel passes — the wall-clock win for hosted providers: K pi subprocesses
+            # run at once, so K×timeout collapses to roughly one timeout. Each pass gets its
+            # own session subdir (a pass-N dir under PI_SESSION_DIR when persisting, else a
+            # throwaway temp dir) so concurrent transcripts never collide. Local llama stays
+            # sequential: a single GPU serves one request at a time, so parallelism buys
+            # nothing and could overload the server.
+            session_base = os.environ.get("PI_SESSION_DIR", "").strip()
+            pass_dirs = ([os.path.join(session_base, f"pass-{i+1}") for i in range(K)]
+                         if session_base else [None] * K)
+            results: dict = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=K) as ex:
+                fut_to_i = {ex.submit(run_pass, wt, model, system, msg, sdir): i
+                            for i, (msg, sdir) in enumerate(zip(msgs, pass_dirs))}
+                for fut in concurrent.futures.as_completed(fut_to_i):
+                    results[fut_to_i[fut]] = fut.result()
+            ordered = [results[i] for i in range(K)]
+        else:
+            ordered = [run_pass(wt, model, system, msg) for msg in msgs]
+        for i, result in enumerate(ordered):
             total_cost += result.cost
             total_tokens += result.tokens
             log(f"#{pr}: pass {i+1}/{K} — {len(result.text)}c · "
-                f"{result.tokens:,} tok · ${result.cost:.4f} in {time.time()-t0:.0f}s")
+                f"{result.tokens:,} tok · ${result.cost:.4f}")
             if result.status in DEGRADED:
                 degraded = True
             if result.text:

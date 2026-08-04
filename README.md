@@ -50,7 +50,7 @@ See [`examples/second-opinion.yml`](examples/second-opinion.yml) for the fuller 
 | `github-token` | `${{ github.token }}` | needs `pull-requests: write` |
 | `pr-number` | the triggering PR | which PR to review |
 | `model` | `z-ai/glm-5.2` | OpenRouter model id for the passes |
-| `k` | `1` | agentic passes to union; `K=1` skips the merge |
+| `k` | `1` | agentic passes to union; `K=1` skips the merge. For `K>1` on OpenRouter the passes run in parallel (one pi subprocess each); local stays sequential. |
 | `merge-model` | = `model` | model for the `K>1` union merge |
 | `project` | repo name | used in the prompt |
 | `guidance-file` | — | path to this repo's review checklist (its "memory") |
