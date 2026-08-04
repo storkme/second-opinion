@@ -46,6 +46,7 @@ import concurrent.futures
 import json
 import math
 import os
+import re
 import subprocess
 import shutil
 import tempfile
@@ -361,6 +362,43 @@ def _list_session_files(session_dir: str) -> set:
     return out
 
 
+_REDACTED = "[REDACTED]"
+_REDACT_RE = re.compile(r"sk-or-v1-[A-Za-z0-9_-]+")
+
+
+def _secret_values() -> list:
+    vals = [os.environ.get(k, "").strip() for k in ("OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN")]
+    return [v for v in vals if v]
+
+
+def _redact_text(text: str) -> str:
+    """Scrub known secret values (and any OpenRouter key shape) from a transcript before it
+    is persisted, so a key that an injected agent echoed into a tool result can't be stored."""
+    out = text
+    for v in _secret_values():
+        out = out.replace(v, _REDACTED)
+    return _REDACT_RE.sub(_REDACTED, out)
+
+
+def _redact_transcripts(session_dir: str) -> None:
+    """Rewrite persisted session files in-place, redacting secrets."""
+    if not session_dir or not os.path.isdir(session_dir):
+        return
+    for fp in _list_session_files(session_dir):
+        try:
+            with open(fp, encoding="utf-8") as f:
+                data = f.read()
+        except OSError:
+            continue
+        clean = _redact_text(data)
+        if clean != data:
+            try:
+                with open(fp, "w", encoding="utf-8") as f:
+                    f.write(clean)
+            except OSError:
+                continue
+
+
 def _int_or_zero(value: object) -> int:
     """Best-effort numeric parsing for provider/session usage metadata."""
     try:
@@ -440,6 +478,9 @@ def _finish_pass(model: str, session_dir: str, internal: bool, text: str, status
     usage = _read_session_usage(session_dir, exclude=prior_files)
     if internal:
         shutil.rmtree(session_dir, ignore_errors=True)
+    else:
+        # Persisted transcript: scrub secrets before the consumer uploads it as an artifact.
+        _redact_transcripts(session_dir)
     tokens = usage.get("total_tokens", 0)
     cost = usage.get("cost_total", 0.0)
     if cost <= 0:

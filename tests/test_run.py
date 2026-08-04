@@ -494,6 +494,50 @@ def test_run_pass_uses_provided_session_dir():
     assert os.path.isdir(d)  # persisted, not scrubbed
 
 
+
+def test_redact_text_replaces_env_key_and_openrouter_pattern():
+    prev = os.environ.get("OPENROUTER_API_KEY")
+    fake = "sk-or-v1-aaaabbbbccccddddeeeeffff0000111122223333"
+    os.environ["OPENROUTER_API_KEY"] = fake
+    try:
+        out = run._redact_text(
+            "KEY=" + fake + " OTHER=" + "sk-or-v1-999999999999998888888888777777")
+    finally:
+        if prev is None:
+            os.environ.pop("OPENROUTER_API_KEY", None)
+        else:
+            os.environ["OPENROUTER_API_KEY"] = prev
+    assert fake not in out
+    assert "999999999999998888888888777777" not in out
+    assert out.count("[REDACTED]") >= 2
+
+
+def test_finish_pass_redacts_persisted_transcript():
+    # A persisted (non-internal) transcript must be scrubbed of the key before the consumer
+    # uploads it as an artifact; usage/token parsing still works on the pre-redact data.
+    prev = os.environ.get("OPENROUTER_API_KEY")
+    fake = "sk-or-v1-abcdef0123456789abcdef0123456789abcdef0123"
+    os.environ["OPENROUTER_API_KEY"] = fake
+    d = tempfile.mkdtemp(prefix="so-redact-")
+    fp = os.path.join(d, "s.jsonl")
+    try:
+        open(fp, "w").write(
+            '{"message":{"usage":{"input":1,"output":1,"totalTokens":2,"cost":{"total":0.01}}}}\n'
+            + "b64 KEY=" + fake + "\n")
+        res = run._finish_pass("m", d, False, "review", "ok")
+        assert res.tokens == 2 and res.cost == 0.01
+        body = open(fp).read()
+        assert fake not in body
+        assert "[REDACTED]" in body
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+        if prev is None:
+            os.environ.pop("OPENROUTER_API_KEY", None)
+        else:
+            os.environ["OPENROUTER_API_KEY"] = prev
+
+
 # Keep this LAST: it iterates globals() at execution time, so any test defined
 # below it would be silently skipped by the `python -m tests.test_run` runner
 # (found by PR #18's own review bots — the appended tests were being skipped).

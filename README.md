@@ -196,6 +196,14 @@ exfiltrate secrets. So:
 - `run.py` strips `GITHUB_TOKEN`/`GH_TOKEN` from the pi subprocess as defense-in-depth, and
   `providers.py` writes `~/.pi/agent/models.json` with mode `600`. The OpenRouter key still
   lives in that file in cleartext (pi reads it from there) — use a **low-limit key**.
+- **Session transcripts are on disk and are your responsibility.** Every pass writes a JSONL
+  transcript (a throwaway temp dir by default, or `PI_SESSION_DIR` when set). Persisted
+  transcripts are **auto-redacted** — the `OPENROUTER_API_KEY` value, any `sk-or-v1-…`
+  token, and `GITHUB_TOKEN`/`GH_TOKEN` are scrubbed before the file is kept. Still, do not
+  point `session-dir` at an artifact that lands on a **public** repo you don't fully trust:
+  a prompt-injected agent could echo the key at runtime before redaction runs, and a durable
+  public artifact is a much larger exposure surface than an ephemeral runner. Prefer private/
+  expiring artifacts on public repos, or drop `session-dir` there entirely.
 - Treat the output as advisory, never a merge gate.
 
 ## Local / CLI use

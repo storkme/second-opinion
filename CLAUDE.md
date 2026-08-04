@@ -168,6 +168,15 @@ forks but not a compromised same-repo author; set `TOOLS=read` to drop shell at 
 cost; use a low-limit OpenRouter key. `run.py` strips `GITHUB_TOKEN`/`GH_TOKEN` from the pi
 subprocess as defense-in-depth (they're only needed by the `gh`/`git` calls in the parent).
 
+**Transcripts are persisted and redacted.** Every pass writes a JSONL session transcript
+(throwaway temp dir by default; `PI_SESSION_DIR` when set). Persisted transcripts are
+auto-redacted (the `OPENROUTER_API_KEY` value, any `sk-or-v1-…` token, and
+`GITHUB_TOKEN`/`GH_TOKEN` are scrubbed before the file is kept). Do not point `session-dir`
+at an artifact that lands on a **public** repo you don't fully trust — redaction runs after
+the pass, so an injected agent can still echo the key into a tool result at runtime, and a
+durable public artifact is a much larger exposure than an ephemeral runner. Prefer
+private/expiring artifacts on public repos, or omit `session-dir` there.
+
 ## Changelog & releases
 
 `CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com) + semver.

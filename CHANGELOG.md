@@ -16,6 +16,13 @@ All notable changes to this project are documented here. The format follows
   image, preventing vulnerable or non-reproducible dependency updates from slipping through;
   the Docker build context is allowlisted so repository secrets and unrelated files are not
   sent to the builder.
+- **Persisted transcripts are auto-redacted.** Because session transcripts record the full
+  agent conversation (including `bash` tool output), a prompt-injected agent could otherwise
+  echo the OpenRouter key into one. Persisted transcripts (under `session-dir`) are now
+  scrubbed of the `OPENROUTER_API_KEY` value, any `sk-or-v1-…` token, and
+  `GITHUB_TOKEN`/`GH_TOKEN` before the file is kept. Operators should still avoid uploading
+  `session-dir` transcripts to **public** artifacts on untrusted repos (redaction runs after
+  the pass, so it is a mitigation, not a sandbox).
 
 ### Fixed
 - A degraded pass is no longer a black box. The timeout branch surfaces the partial
