@@ -122,8 +122,10 @@ agentic path never used.
 | `EXCLUDE_GLOBS` | sensible set | comma-separated globs dropped from the diff |
 | `MAX_DIFF_CHARS` | `60000` | diff size cap (whole-file boundaries) |
 | `PASS_TIMEOUT_S` | `900` | per-pass timeout |
+| `PI_SESSION_DIR` | — | when set, pi writes each pass's JSONL session transcript here instead of ephemeral `--no-session`. Point it at a path the consumer persists (e.g. upload as an artifact) so a blocked/empty pass is forensically inspectable. |
 | `TOOLS` | `read,bash` | pi tool grant; `read` drops shell (safer on untrusted authors) |
 | `PI_REASONING` | `true` | honored for **both** providers; set `false` for a non-reasoning model |
+| `PI_MAX_TOKENS` | `65536` openrouter / `32768` local | max completion tokens for a review pass. OpenRouter defaults to the model cap — deepseek-v4-flash-0731 caps at 65536; the old 32768 could burn a reasoning model's whole budget in the reasoning channel and return an empty 200 (spaghettio #574, #565/#566). Local llama keeps 32768. Override via `max-tokens` action input / env. |
 | `FAIL_ON_DEGRADED` | `true` | exit `2` when a degraded pass (timeout / non-zero pi exit / empty output / failed head-checkout) posts no review; `false` restores always-green |
 | `REPO_DIR` | cwd | the target repo checkout |
 

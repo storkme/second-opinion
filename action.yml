@@ -45,10 +45,25 @@ inputs:
     description: "Cap on the diff size sent to the model."
     required: false
     default: "60000"
+  max-tokens:
+    description: "Max completion tokens pi sends for a review pass. OpenRouter fallback is
+      65536 (deepseek-v4-flash-0731's cap); a reasoning-capable model can exhaust a smaller
+      budget in its reasoning channel and return an empty 200. Reduce only if the provider
+      or model demands it."
+    required: false
+    default: "65536"
   pass-timeout-seconds:
     description: "Per-pass timeout."
     required: false
     default: "900"
+  session-dir:
+    description: "Directory where pi writes its JSONL session transcripts. When set, each
+      pass's full agent transcript is saved there (instead of pi's ephemeral --no-session
+      mode) so a blocked or empty pass is forensically inspectable. Point it at a path you
+      persist — e.g. a subdir of the runner workspace later uploaded as an artifact.
+      Leave empty to keep the previous ephemeral behavior."
+    required: false
+    default: ""
   tools:
     description: "Agent tool grant. 'read,bash' (default) greps for callers/tests; set
       'read' to drop shell access on repos with untrusted PR authors. See README Security."
@@ -84,7 +99,9 @@ runs:
     GUIDANCE_FILE: ${{ inputs.guidance-file }}
     EXCLUDE_GLOBS: ${{ inputs.exclude-globs }}
     MAX_DIFF_CHARS: ${{ inputs.max-diff-chars }}
+    PI_MAX_TOKENS: ${{ inputs.max-tokens }}
     PASS_TIMEOUT_S: ${{ inputs.pass-timeout-seconds }}
+    PI_SESSION_DIR: ${{ inputs.session-dir }}
     TOOLS: ${{ inputs.tools }}
     PI_REASONING: ${{ inputs.reasoning }}
     FAIL_ON_DEGRADED: ${{ inputs.fail-on-degraded }}

@@ -2,8 +2,10 @@
 and the marker dedup query. Subprocess/requests are stubbed — no network. Run with
 `pytest` (or directly: `python -m tests.test_run`).
 """
+
 import os
 import sys
+import tempfile
 import types
 
 os.environ.setdefault("GITHUB_REPO", "o/r")
@@ -31,14 +33,21 @@ class _Resp:
 
 
 def test_merge_reviews_parses_and_strips_content():
-    run.requests.post = lambda *a, **k: _Resp({"choices": [{"message": {"content": " merged "}}]})
+    run.requests.post = lambda *a, **k: _Resp(
+        {"choices": [{"message": {"content": " merged "}}]}
+    )
     assert run.merge_reviews(1, "t", ["pass a", "pass b"]) == "merged"
 
 
 def test_merge_reviews_raises_clean_on_malformed_200():
     # empty choices / error envelope / moderation-shaped — must be a clean RuntimeError,
     # not a raw KeyError/IndexError leaking to the caller.
-    for payload in ({"choices": []}, {"error": {"message": "bad"}}, {}, {"choices": [{}]}):
+    for payload in (
+        {"choices": []},
+        {"error": {"message": "bad"}},
+        {},
+        {"choices": [{}]},
+    ):
         run.requests.post = lambda *a, p=payload, **k: _Resp(p)
         try:
             run.merge_reviews(1, "t", ["a"])
@@ -66,11 +75,31 @@ def test_run_pass_ok_returns_text_and_status():
 def test_run_pass_timeout_is_degraded_and_warns():
     def boom(*a, **k):
         raise run.subprocess.TimeoutExpired(cmd="pi", timeout=run.PASS_TIMEOUT_S)
+
     run.subprocess.run = boom
     ann = _capture_annotations()
     res = run.run_pass("/wt", "m", "sys", "usr")
     assert res.status == "timeout" and res.text == "" and res.status in run.DEGRADED
     assert ann[0][0] == "warning" and "timed out" in ann[0][1]
+
+
+def test_run_pass_timeout_surfaces_partial_output():
+    # A blocked pass must not be a black box: TimeoutExpired carries partial stdout/stderr
+    # that the timeout branch now surfaces for diagnosis.
+    def boom(*a, **k):
+        raise run.subprocess.TimeoutExpired(
+            cmd="pi",
+            timeout=run.PASS_TIMEOUT_S,
+            output="read tool call in flight ...",
+            stderr="some stderr tail",
+        )
+
+    run.subprocess.run = boom
+    ann = _capture_annotations()
+    res = run.run_pass("/wt", "m", "sys", "usr")
+    assert res.status == "timeout"
+    assert "partial output" in ann[0][1]
+    assert "some stderr tail" in ann[0][1]
 
 
 def test_run_pass_nonzero_exit_surfaces_stderr_verbatim():
@@ -91,10 +120,25 @@ def test_run_pass_empty_clean_exit_is_degraded():
     assert ann[0][0] == "warning" and "no review output" in ann[0][1]
 
 
+def test_run_pass_empty_surfaces_stderr_for_diagnosis():
+    # A silent exit-0 pass can still carry a tale in stderr (a provider warning / empty
+    # assistant message pi relayed) — it must reach the annotation, not vanish inline.
+    run.subprocess.run = lambda *a, **k: FakeProc(
+        0, stdout="", stderr="upstream returned empty completion\n"
+    )
+    ann = _capture_annotations()
+    res = run.run_pass("/wt", "m", "sys", "usr")
+    assert res.status == "empty"
+    assert "no review output" in ann[0][1]
+    assert "empty completion" in ann[0][1]
+
+
 def test_should_fail_only_on_degraded_without_post():
     # The exit-2 contract: a degraded pass that posted nothing is the only failure.
-    assert run._should_fail(posted=False, degraded=True) is True   # silent failure → exit 2
-    assert run._should_fail(posted=True, degraded=True) is False   # posted review wins
+    assert (
+        run._should_fail(posted=False, degraded=True) is True
+    )  # silent failure → exit 2
+    assert run._should_fail(posted=True, degraded=True) is False  # posted review wins
     assert run._should_fail(posted=False, degraded=False) is False  # clean empty sweep
     assert run._should_fail(posted=True, degraded=False) is False
 
@@ -104,6 +148,7 @@ def test_annotate_escapes_percent_and_newlines():
     # stderr must render verbatim, not as "%".
     import contextlib
     import io
+
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         _REAL_ANNOTATE("error", "50%25 off\nnext")
@@ -114,8 +159,11 @@ def test_review_pr_worktree_add_failure_is_degraded_and_annotates():
     # A failed head-checkout leaves the PR unreviewed — it must trip the tripwire
     # (degraded=True + an error annotation), not slip out green.
     run._gh = lambda args, timeout_s=60: (
-        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n")
-    run._git = lambda args, check=True: FakeProc(returncode=1, stderr="fatal: bad object\n")
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+    run._git = lambda args, check=True: FakeProc(
+        returncode=1, stderr="fatal: bad object\n"
+    )
     ann = _capture_annotations()
     out = run.review_pr(7, "t", "deadbeef00", "m", "m", dry_run=True)
     assert out == run.ReviewOutcome(posted=False, degraded=True)
@@ -195,6 +243,7 @@ def test_run_pass_oversized_system_prompt_fails_legibly_not_e2big():
     assert called["run"] is False, "pi must not be spawned with an oversized system arg"
     assert ann[0][0] == "error" and "GUIDANCE" in ann[0][1]
 
+
 # Keep this LAST: it iterates globals() at execution time, so any test defined
 # below it would be silently skipped by the `python -m tests.test_run` runner
 # (found by PR #18's own review bots — the appended tests were being skipped).
@@ -203,3 +252,121 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("PASS", name)
+
+
+def test_run_pass_session_dir_targets_dir_and_drops_no_session():
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return FakeProc(0, stdout="review ok")
+
+    run.subprocess.run = fake_run
+    prev = os.environ.get("PI_SESSION_DIR")
+    os.environ["PI_SESSION_DIR"] = "/tmp/so-test-sess"
+    try:
+        res = run.run_pass("/wt", "m", "sys", "usr")
+    finally:
+        if prev is None:
+            os.environ.pop("PI_SESSION_DIR", None)
+        else:
+            os.environ["PI_SESSION_DIR"] = prev
+    assert res.status == "ok"
+    assert "--session-dir" in seen["cmd"]
+    assert "/tmp/so-test-sess" in seen["cmd"]
+    assert "--no-session" not in seen["cmd"]
+
+
+def test_run_pass_default_captures_throwaway_session():
+    # Default (no PI_SESSION_DIR) always writes a session to a per-pass temp dir so the
+    # pass's real token usage/cost is readable, then scrubs it. No --no-session, and the
+    # temp dir is gone afterward.
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return FakeProc(0, stdout="review ok")
+
+    run.subprocess.run = fake_run
+    prev = os.environ.get("PI_SESSION_DIR")
+    os.environ.pop("PI_SESSION_DIR", None)
+    try:
+        res = run.run_pass("/wt", "m", "sys", "usr")
+    finally:
+        if prev is not None:
+            os.environ["PI_SESSION_DIR"] = prev
+    assert "--no-session" not in seen["cmd"]
+    assert "--session-dir" in seen["cmd"]
+    sd = seen["cmd"][seen["cmd"].index("--session-dir") + 1]
+    assert sd.startswith(tempfile.gettempdir())
+    assert not os.path.isdir(sd)  # throwaway dir cleaned up
+    assert res.cost == 0.0 and res.tokens == 0  # no real session -> no usage
+
+
+def test_chat_captures_usage_cost_in_meta():
+    run.requests.post = lambda *a, **k: _Resp({
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"total_tokens": 100, "cost": 0.0123,
+                  "completion_tokens_details": {"reasoning_tokens": 55}},
+    })
+    meta = {}
+    out = run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
+    assert out == "ok"
+    assert meta["cost"] == 0.0123
+    assert meta["tokens"] == 100
+    assert meta["reasoning_tokens"] == 55
+
+
+def test_failure_notice_includes_run_url():
+    prev = {k: os.environ.get(k) for k in
+            ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID")}
+    os.environ["GITHUB_SERVER_URL"] = "https://github.com"
+    os.environ["GITHUB_REPOSITORY"] = "o/r"
+    os.environ["GITHUB_RUN_ID"] = "12345"
+    try:
+        text = run._failure_notice_text()
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    assert "https://github.com/o/r/actions/runs/12345" in text
+
+
+def test_failure_notice_omits_url_without_run():
+    prev = os.environ.get("GITHUB_RUN_ID")
+    os.environ.pop("GITHUB_RUN_ID", None)
+    try:
+        text = run._failure_notice_text()
+    finally:
+        if prev is not None:
+            os.environ["GITHUB_RUN_ID"] = prev
+    assert "actions/runs" not in text
+
+
+def test_cost_footer_formats_and_stays_empty_when_no_spend():
+    assert run._cost_footer(0, 0, False) == ""
+    assert "$0.0123" in run._cost_footer(0.01234, 1000, True)
+    assert "1,000 tokens" in run._cost_footer(0.01234, 1000, True)
+    assert run._cost_footer(0, 500, False) != ""
+
+
+def test_read_session_usage_excludes_prior_files():
+    # A shared persisted session-dir accumulates files across K sequential passes. Each pass
+    # must only count ITS OWN transcript, not the cumulative usage of earlier passes.
+    d = tempfile.mkdtemp(prefix="so-sess-test-")
+    try:
+        f1 = os.path.join(d, "pass1.jsonl")
+        f2 = os.path.join(d, "pass2.jsonl")
+        with open(f1, "w") as f:
+            f.write('{"message":{"usage":{"input":10,"output":5,"cache_read":1,"cache_write":0}}}\n')
+        with open(f2, "w") as f:
+            f.write('{"message":{"usage":{"input":100,"output":50,"cache_read":4,"cache_write":0}}}\n')
+        both = run._read_session_usage(d)
+        assert both["input"] == 110 and both["output"] == 55 and both["cache_read"] == 5
+        second = run._read_session_usage(d, exclude={f1})
+        assert second["input"] == 100 and second["output"] == 50 and second["cache_read"] == 4
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)

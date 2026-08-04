@@ -5,6 +5,37 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Fixed
+- A degraded pass is no longer a black box. The timeout branch surfaces the partial
+  stdout/stderr captured before the kill, and an exit-0-with-no-output pass surfaces any
+  stderr, so a blocked review carries a forensic tail in the log/annotation instead of a
+  bare "produced no review output" line.
+- A degraded review with **no output** now posts a comment on the PR explaining the failure
+  and linking the run log/artifacts (built from `GITHUB_RUN_ID`), instead of posting
+  nothing at all. The notice is not a passing review, so the `fail-on-degraded` tripwire
+  still exits 2 and the check stays red — no more silent-failure green.
+
+### Added
+- **Real cost/token reporting.** Per-pass token counts are read from pi's session transcript
+  and the per-pass log line now shows `N tokens · $cost`; the OpenRouter **merge** call
+  reports its authoritative `usage.cost`. The posted review's footer now shows the **total
+  review price and token count** for the whole run. OpenRouter prices are fetched once and
+  cached (`_model_prices`); if pricing is unavailable, the footer falls back to tokens only.
+  Per-pass usage is attributed correctly even when passes share a persisted `session-dir`
+  (each pass counts only its own transcript, not the cumulative usage of earlier passes).
+- New `session-dir` action input (env `PI_SESSION_DIR`): when set, pi persists each pass's
+  full JSONL session transcript there (upload it as an artifact to replay a blocked/empty
+  pass). When empty, pi still writes a throwaway session internally per pass so token/cost
+  reporting works — but the transcript is scrubbed afterward rather than retained, matching
+  the old ephemeral behavior.
+- New `max-tokens` action input (env `PI_MAX_TOKENS`): max completion tokens for a pass.
+  OpenRouter now defaults to `65536` (deepseek-v4-flash-0731's cap) instead of `32768` — a
+  reasoning-capable model could exhaust the smaller budget in its reasoning channel and
+  return an empty `content` on a 200 (the same class as the #16 merge fix, seen again on
+  the agentic passes of spaghettio #574). Local stays at `32768`.
+
 ## [1.2.1] - 2026-08-02
 
 ### Fixed
