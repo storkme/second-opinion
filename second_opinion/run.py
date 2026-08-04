@@ -759,6 +759,7 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     try:
         msgs = [user_turn(filtered if i == 0 else rv.shuffle_inputs(filtered, i))
                 for i in range(K)]
+        elapsed: dict = {}
         if K > 1 and PROVIDER == "openrouter":
             # Parallel passes — the wall-clock win for hosted providers: K pi subprocesses
             # run at once, so K×timeout collapses to roughly one timeout. Each pass gets its
