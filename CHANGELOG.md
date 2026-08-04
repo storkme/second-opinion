@@ -7,6 +7,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+- The Action image no longer performs an unpinned global npm install. Its maintained pi
+  runtime is pinned exactly and installed with `npm ci` from a committed integrity-checked
+  lockfile, with dependency lifecycle scripts disabled. This also moves off the deprecated
+  `@mariozechner` package, whose final release has active security advisories, to the
+  maintained `@earendil-works` package. CI audits the locked production graph and builds the
+  image, preventing vulnerable or non-reproducible dependency updates from slipping through;
+  the Docker build context is allowlisted so repository secrets and unrelated files are not
+  sent to the builder.
+
 ### Fixed
 - A degraded pass is no longer a black box. The timeout branch surfaces the partial
   stdout/stderr captured before the kill, and an exit-0-with-no-output pass surfaces any

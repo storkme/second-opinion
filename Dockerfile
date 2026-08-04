@@ -14,9 +14,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# pi: the agentic runner. claude is intentionally NOT installed — both the review passes
-# and the K>1 merge run via OpenRouter or a local llama-server, so no Anthropic auth.
-RUN npm install -g @mariozechner/pi-coding-agent && npm cache clean --force
+# pi: the agentic runner. Install the exact, integrity-checked dependency graph from the
+# committed lockfile. Lifecycle scripts are disabled: pi ships built JS and needs none at
+# install time. claude is intentionally NOT installed — both the review passes and the K>1
+# merge run via OpenRouter or a local llama-server, so no Anthropic auth.
+COPY package.json package-lock.json /opt/pi/
+RUN npm ci --prefix /opt/pi --omit=dev --ignore-scripts --no-audit --no-fund \
+    && /opt/pi/node_modules/.bin/pi --version \
+    && npm cache clean --force
+ENV PATH="/opt/pi/node_modules/.bin:${PATH}"
 
 COPY second_opinion/ /opt/reviewer/second_opinion/
 COPY entrypoint.sh /entrypoint.sh

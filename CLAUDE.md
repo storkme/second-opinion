@@ -41,7 +41,7 @@ being *decorrelated* from them: a genuinely independent second pair of eyes, not
 
 ## Invariants (do not break these)
 
-- **pi is the runner.** Agentic passes run via [`@mariozechner/pi-coding-agent`](https://www.npmjs.com/package/@mariozechner/pi-coding-agent)
+- **pi is the runner.** Agentic passes run via [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
   (`pi --provider … --model …`). Nothing else drives the model for the review passes.
 - **Idempotency is an HTML marker comment on the PR** — `<!-- second-opinion sha={sha} -->`
   as the first line of the posted comment. No database, no state files. Safe on ephemeral

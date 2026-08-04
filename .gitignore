@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 .venv/
+node_modules/
 # daemon secrets — only .env.example is tracked
 deploy/.env
 .env
