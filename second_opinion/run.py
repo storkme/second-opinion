@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import shutil
@@ -358,15 +359,34 @@ def _list_session_files(session_dir: str) -> set:
     return out
 
 
+def _int_or_zero(value: object) -> int:
+    """Best-effort numeric parsing for provider/session usage metadata."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _float_or_zero(value: object) -> float:
+    """Best-effort finite float parsing for provider/session usage metadata."""
+    try:
+        parsed = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return parsed if math.isfinite(parsed) else 0.0
+
+
 def _read_session_usage(session_dir: str, exclude: set = ()) -> dict:
     """Sum real token usage across the pi session JSONL file(s) in a dir, skipping files
     already present before the pass began (so a pass shares a persisted dir without
     absorbing the cumulative usage of earlier passes).
 
-    pi's session `Usage` uses camelCase keys (`cacheRead`/`cacheWrite`); these are
-    normalized to snake_case. pi's authoritative per-message `cost.total` is also summed
-    into `cost_total` when present."""
-    total = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cost_total": 0.0}
+    pi's session `Usage` uses camelCase keys (`cacheRead`/`cacheWrite`/`totalTokens`);
+    these are normalized to snake_case. The authoritative per-message `totalTokens` and
+    `cost.total` values are summed when present. Component token counts remain available
+    for cost estimation, and are the total-token fallback for older transcripts."""
+    total = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
+             "total_tokens": 0, "cost_total": 0.0}
     if not session_dir or not os.path.isdir(session_dir):
         return total
     for root, _dirs, files in os.walk(session_dir):
@@ -384,15 +404,27 @@ def _read_session_usage(session_dir: str, exclude: set = ()) -> dict:
                         usage = (entry.get("message") or {}).get("usage")
                         if not isinstance(usage, dict):
                             continue
-                        total["input"] += int(usage.get("input") or 0)
-                        total["output"] += int(usage.get("output") or 0)
-                        total["cache_read"] += int(usage.get("cacheRead")
-                                                   or usage.get("cache_read") or 0)
-                        total["cache_write"] += int(usage.get("cacheWrite")
-                                                    or usage.get("cache_write") or 0)
-                        cost = (usage.get("cost") or {}).get("total")
-                        if isinstance(cost, (int, float)):
-                            total["cost_total"] += float(cost)
+                        input_tokens = _int_or_zero(usage.get("input"))
+                        output_tokens = _int_or_zero(usage.get("output"))
+                        cache_read = _int_or_zero(usage.get("cacheRead")
+                                                  or usage.get("cache_read"))
+                        cache_write = _int_or_zero(usage.get("cacheWrite")
+                                                   or usage.get("cache_write"))
+                        total["input"] += input_tokens
+                        total["output"] += output_tokens
+                        total["cache_read"] += cache_read
+                        total["cache_write"] += cache_write
+                        raw_total = usage.get("totalTokens")
+                        if raw_total is None:
+                            raw_total = usage.get("total_tokens")
+                        if raw_total is None:
+                            total["total_tokens"] += (input_tokens + output_tokens
+                                                       + cache_read + cache_write)
+                        else:
+                            total["total_tokens"] += _int_or_zero(raw_total)
+                        cost = usage.get("cost")
+                        if isinstance(cost, dict):
+                            total["cost_total"] += _float_or_zero(cost.get("total"))
             except (OSError, ValueError):
                 continue
     return total
@@ -406,8 +438,7 @@ def _finish_pass(model: str, session_dir: str, internal: bool, text: str, status
     usage = _read_session_usage(session_dir, exclude=prior_files)
     if internal:
         shutil.rmtree(session_dir, ignore_errors=True)
-    tokens = (usage.get("input", 0) + usage.get("output", 0)
-              + usage.get("cache_read", 0) + usage.get("cache_write", 0))
+    tokens = usage.get("total_tokens", 0)
     cost = usage.get("cost_total", 0.0)
     if cost <= 0:
         # pi may not price a custom OpenRouter model (cost.total is 0); fall back to a
@@ -422,6 +453,10 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
     session_dir = os.environ.get("PI_SESSION_DIR", "").strip()
     internal = False
     if session_dir:
+        # pi runs with cwd=wt below, while this process creates/reads the transcript dir
+        # from its own cwd. Normalize once so a relative PI_SESSION_DIR names the same
+        # directory for both processes and survives removal of the temporary worktree.
+        session_dir = os.path.abspath(session_dir)
         os.makedirs(session_dir, exist_ok=True)
         flags += ["--session-dir", session_dir]
     else:
@@ -503,22 +538,38 @@ def _chat(base_url: str, api_key: str, model: str, prompt: str, meta: dict | Non
         timeout=600,
     )
     r.raise_for_status()
-    choices = r.json().get("choices") or []
-    msg = (choices[0].get("message") or {}) if choices else {}
-    content = (msg.get("content") or "").strip()
+    try:
+        payload = r.json()
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    choices = payload.get("choices") or []
+    if not isinstance(choices, list):
+        choices = []
+    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    msg = choice.get("message") or {}
+    if not isinstance(msg, dict):
+        msg = {}
+    raw_content = msg.get("content")
+    content = raw_content.strip() if isinstance(raw_content, str) else ""
     if not content and choices:
         # Diagnose the empty-content-200 shape instead of failing mute:
         # finish_reason + reasoning length distinguish the reasoning-burn
         # failure mode from a genuinely empty reply.
         log(f"_chat: empty content on 200 — finish_reason="
-            f"{choices[0].get('finish_reason')!r}, "
+            f"{choice.get('finish_reason')!r}, "
             f"reasoning_len={len(msg.get('reasoning') or '')}")
-    usage = r.json().get("usage") or {}
+    usage = payload.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
     if meta is not None:
-        meta["cost"] = float(usage.get("cost") or 0)
-        meta["tokens"] = int(usage.get("total_tokens") or 0)
+        meta["cost"] = _float_or_zero(usage.get("cost"))
+        meta["tokens"] = _int_or_zero(usage.get("total_tokens"))
         ctd = usage.get("completion_tokens_details") or {}
-        meta["reasoning_tokens"] = int(ctd.get("reasoning_tokens") or 0)
+        if not isinstance(ctd, dict):
+            ctd = {}
+        meta["reasoning_tokens"] = _int_or_zero(ctd.get("reasoning_tokens"))
     return content
 
 
@@ -571,8 +622,12 @@ def _failure_notice_text(sha: str, checkout: bool = False) -> str:
             text += f"\n- **Run log + artifacts:** {server}/{repo}/actions/runs/{rid}\n"
     except Exception:
         pass
-    text += ("\n*The check is deliberately red so this is not mistaken for a passing review. "
-             "Re-run the job or push a commit to retry.*\n")
+    if FAIL_ON_DEGRADED:
+        text += ("\n*In one-shot mode this malfunction fails the check so it is not mistaken "
+                 "for a passing review. Re-run the job or push a commit to retry.*\n")
+    else:
+        text += ("\n*`FAIL_ON_DEGRADED=false`, so this malfunction does not fail the check. "
+                 "Re-run the job or push a commit to retry.*\n")
     return text
 
 
@@ -590,7 +645,13 @@ def _post_failure_notice(pr: int, sha: str, dry_run: bool, checkout: bool = Fals
         print("\n" + "=" * 72 + f"\nDRY RUN — would post failure notice to #{pr}:\n"
               + "=" * 72 + f"\n{text}\n")
         return
-    if _already_noticed_failure(pr, sha):
+    try:
+        already_noticed = _already_noticed_failure(pr, sha)
+    except Exception as e:  # a failed dedup read must not suppress the more important notice
+        log(f"#{pr}: could not check for an existing failure notice "
+            f"({' '.join(str(e).split())[:120]}) — attempting to post")
+        already_noticed = False
+    if already_noticed:
         log(f"#{pr}: failure notice for {sha[:10]} already posted — skipping duplicate")
         return
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
@@ -600,7 +661,7 @@ def _post_failure_notice(pr: int, sha: str, dry_run: bool, checkout: bool = Fals
         _gh(["pr", "comment", str(pr), "--body-file", tmp])
         log(f"#{pr}: posted degraded-review failure notice")
     except Exception:
-        log(f"#{pr}: failed to post failure notice — check stays red regardless")
+        log(f"#{pr}: failed to post failure notice — review remains degraded")
     finally:
         try:
             os.unlink(tmp)
@@ -659,8 +720,8 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     if not passes:
         # Degraded with no output: still flag it loudly — but make the failure visible on the
         # PR with a comment + a link to the run log/artifacts, instead of posting nothing at
-        # all. The notice is NOT a review, so the tripwire still exits 2 (check stays red).
-        log(f"#{pr}: all passes empty — posting failure notice, check stays red")
+        # all. The notice is NOT a review, so the configurable degraded tripwire still applies.
+        log(f"#{pr}: all passes empty — posting failure notice")
         _post_failure_notice(pr, sha, dry_run)
         return ReviewOutcome(False, True)
 

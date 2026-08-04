@@ -269,6 +269,49 @@ def test_run_pass_session_dir_targets_dir_and_drops_no_session():
     assert "--no-session" not in seen["cmd"]
 
 
+def test_run_pass_relative_session_dir_is_shared_with_worktree_process():
+    # The parent reads sessions from its cwd, but pi runs with cwd=the PR worktree. A relative
+    # path therefore has to become absolute before it is passed to pi, or usage is reported as
+    # zero and the only transcript is deleted with the worktree.
+    seen = {}
+    previous_session_dir = os.environ.get("PI_SESSION_DIR")
+    previous_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory(prefix="so-relative-session-") as root:
+        parent = os.path.join(root, "parent")
+        worktree = os.path.join(root, "worktree")
+        os.makedirs(parent)
+        os.makedirs(worktree)
+
+        def fake_run(cmd, **kw):
+            session_arg = cmd[cmd.index("--session-dir") + 1]
+            seen["session_arg"] = session_arg
+            actual_dir = (session_arg if os.path.isabs(session_arg)
+                          else os.path.join(kw["cwd"], session_arg))
+            os.makedirs(actual_dir, exist_ok=True)
+            with open(os.path.join(actual_dir, "pass.jsonl"), "w") as f:
+                f.write('{"message":{"usage":{"input":10,"output":5,'
+                        '"totalTokens":15,"cost":{"total":0.01}}}}\n')
+            return FakeProc(0, stdout="review ok")
+
+        run.subprocess.run = fake_run
+        os.chdir(parent)
+        os.environ["PI_SESSION_DIR"] = "relative-sessions"
+        try:
+            res = run.run_pass(worktree, "m", "sys", "usr")
+        finally:
+            os.chdir(previous_cwd)
+            if previous_session_dir is None:
+                os.environ.pop("PI_SESSION_DIR", None)
+            else:
+                os.environ["PI_SESSION_DIR"] = previous_session_dir
+
+        expected = os.path.join(parent, "relative-sessions")
+        assert seen["session_arg"] == expected
+        assert res.tokens == 15 and abs(res.cost - 0.01) < 1e-9
+        assert os.path.isfile(os.path.join(expected, "pass.jsonl"))
+        assert not os.path.exists(os.path.join(worktree, "relative-sessions"))
+
+
 def test_run_pass_default_captures_throwaway_session():
     # Default (no PI_SESSION_DIR) always writes a session to a per-pass temp dir so the
     # pass's real token usage/cost is readable, then scrubs it. No --no-session, and the
@@ -309,6 +352,18 @@ def test_chat_captures_usage_cost_in_meta():
     assert meta["reasoning_tokens"] == 55
 
 
+def test_chat_keeps_valid_content_when_usage_metadata_is_malformed():
+    run.requests.post = lambda *a, **k: _Resp({
+        "choices": [{"message": {"content": "usable review"}}],
+        "usage": {"total_tokens": {"bad": "shape"}, "cost": "not-a-number",
+                  "completion_tokens_details": ["not", "a", "mapping"]},
+    })
+    meta = {}
+    out = run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
+    assert out == "usable review"
+    assert meta == {"cost": 0.0, "tokens": 0, "reasoning_tokens": 0}
+
+
 def test_failure_notice_includes_run_url():
     prev = {k: os.environ.get(k) for k in
             ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID")}
@@ -337,6 +392,39 @@ def test_failure_notice_omits_url_without_run():
     assert "actions/runs" not in text
 
 
+def test_failure_notice_describes_configured_check_behavior():
+    previous = run.FAIL_ON_DEGRADED
+    try:
+        run.FAIL_ON_DEGRADED = True
+        failing = run._failure_notice_text("somesha")
+        run.FAIL_ON_DEGRADED = False
+        non_failing = run._failure_notice_text("somesha")
+    finally:
+        run.FAIL_ON_DEGRADED = previous
+    assert "fails the check" in failing
+    assert "does not fail the check" in non_failing
+    assert "deliberately red" not in non_failing
+
+
+def test_failure_notice_posts_when_dedup_lookup_fails():
+    calls = []
+    previous_lookup = run._already_noticed_failure
+    previous_gh = run._gh
+
+    def failed_lookup(*args, **kwargs):
+        raise RuntimeError("temporary comments API failure")
+
+    run._already_noticed_failure = failed_lookup
+    run._gh = lambda args, timeout_s=60: calls.append(args) or ""
+    try:
+        run._post_failure_notice(7, "somesha", dry_run=False)
+    finally:
+        run._already_noticed_failure = previous_lookup
+        run._gh = previous_gh
+    assert len(calls) == 1
+    assert calls[0][:3] == ["pr", "comment", "7"]
+
+
 def test_cost_footer_formats_and_stays_empty_when_no_spend():
     assert run._cost_footer(0, 0, False) == ""
     assert "$0.0123" in run._cost_footer(0.01234, 1000, True)
@@ -358,10 +446,29 @@ def test_read_session_usage_excludes_prior_files():
         both = run._read_session_usage(d)
         assert both["input"] == 110 and both["output"] == 55
         assert both["cache_read"] == 5 and both["cache_write"] == 0
+        assert both["total_tokens"] == 170
         assert abs(both["cost_total"] - 0.10) < 1e-9
         second = run._read_session_usage(d, exclude={f1})
         assert second["input"] == 100 and second["output"] == 50
-        assert second["cache_read"] == 4 and abs(second["cost_total"] - 0.08) < 1e-9
+        assert second["cache_read"] == 4 and second["total_tokens"] == 154
+        assert abs(second["cost_total"] - 0.08) < 1e-9
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_read_session_usage_prefers_authoritative_total_tokens():
+    d = tempfile.mkdtemp(prefix="so-sess-total-test-")
+    try:
+        with open(os.path.join(d, "pass.jsonl"), "w") as f:
+            # Some providers include cached tokens in input already. Summing components would
+            # report 160, but pi's authoritative total for the message is 110.
+            f.write('{"message":{"usage":{"input":100,"output":10,"cacheRead":50,'
+                    '"cacheWrite":0,"totalTokens":110,"cost":{"total":0.03}}}}\n')
+        usage = run._read_session_usage(d)
+        result = run._finish_pass("m", d, False, "review", "ok")
+        assert usage["total_tokens"] == 110
+        assert result.tokens == 110
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)
@@ -375,5 +482,3 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("PASS", name)
-
-
