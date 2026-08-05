@@ -12,10 +12,13 @@ concurrency:                       # one run per PR; a new push cancels the old
 
 jobs:
   review:
-    # Same-repo PRs only, so secrets are never exposed to a fork.
+    # Same-repo PRs only, so secrets are never exposed to a fork. Dependabot PRs are
+    # skipped too: they run against GitHub's separate Dependabot secret store, so the
+    # key arrives empty and the job would fail on every dependency bump.
     if: |
       github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:

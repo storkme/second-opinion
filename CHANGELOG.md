@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- The shipped example workflow (and the README quickstart) now skip **Dependabot** PRs
+  alongside forks. Dependabot-triggered runs read from GitHub's *separate* Dependabot
+  secret store, so `secrets.OPENROUTER_API_KEY` arrives empty and the job fails with
+  "Missing required environment variable" — a guaranteed red check on every dependency
+  bump. Skipping is preferred over adding the key to the Dependabot store, which would
+  expose it to every automated bump run.
+
 ### Fixed
 - A flaked union merge no longer throws away the review it was given. When `K>1`, the merge
   call is retried once, and if it fails twice the raw passes are posted unmerged behind a

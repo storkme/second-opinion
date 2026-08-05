@@ -28,7 +28,8 @@ on:
   pull_request: { types: [opened, synchronize, ready_for_review, reopened] }
 jobs:
   review:
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions: { contents: read, pull-requests: write }
     steps:
@@ -41,6 +42,11 @@ jobs:
 
 See [`examples/second-opinion.yml`](examples/second-opinion.yml) for the fuller version
 (concurrency, fork guard, timeout).
+
+> **Dependabot PRs are skipped.** Dependabot-triggered runs read from GitHub's separate
+> Dependabot secret store, so `secrets.OPENROUTER_API_KEY` arrives empty and the job would
+> fail on every dependency bump. Prefer skipping over adding the key to that store — it
+> would expose it to every automated bump run.
 
 ### Action inputs
 

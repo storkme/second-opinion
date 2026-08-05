@@ -13,10 +13,17 @@ concurrency:                       # one run per PR; a new push cancels the old
 
 jobs:
   review:
-    # Same-repo PRs only, so the key is never exposed to a fork.
+    # Same-repo, non-Dependabot PRs only. The fork guard keeps the key off untrusted
+    # branches. The Dependabot guard is not about trust: Dependabot-triggered runs read
+    # from GitHub's *separate* Dependabot secret store, so `secrets.OPENROUTER_API_KEY`
+    # arrives empty and the job dies with "Missing required environment variable" — a
+    # guaranteed red check on every dependency bump. Copying the key into that store
+    # would fix the symptom by handing it to every automated bump run; a version-bump
+    # diff is not worth a review anyway.
     if: |
       github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
