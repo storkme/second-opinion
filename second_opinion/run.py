@@ -94,6 +94,12 @@ FAIL_ON_DEGRADED = (os.environ.get("FAIL_ON_DEGRADED", "true").strip().lower()
                     in ("1", "true", "yes", "on"))
 MARKER = "<!-- second-opinion sha={sha} -->"
 FAIL_MARKER = "<!-- second-opinion-failed sha={sha} -->"
+# GitHub rejects an issue/PR comment body over 65536 characters. Nothing upstream bounds
+# the posted review (MAX_DIFF_CHARS caps the *input*), and an over-cap body 422s on post →
+# the exception leaves review_pr → sweep files it as a silent failure → exit 2 with no
+# review at all. The merge-fallback path is the worst case, since it concatenates the K raw
+# passes with no dedup and is therefore strictly larger than the merged body would be.
+COMMENT_MAX = 65536
 
 MERGE_PROMPT = """\
 You are merging K independent reviews of the SAME pull-request diff into one comment.
@@ -640,10 +646,12 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
 
     Disabling reasoning on the merge call removed the *known* cause of those empty 200s,
     but it cannot make a hosted call infallible — it can still flake empty or raise. So:
-    retry once (the policy `eval.py`'s judge has had since #9, for the same reason), then
-    fall back to posting the raw passes unmerged. A merge-step outage now degrades
-    formatting, never delivery, and the `::warning` annotation keeps the malfunction
-    visible instead of trading a red check for a silent one."""
+    retry once, in the spirit of the retry `eval.py`'s judge has had since #9 (broader
+    here: eval's judge retries only on unusable content and lets a raised HTTPError
+    propagate, while this must not raise at all), then fall back to posting the raw passes
+    unmerged. A merge-step outage now degrades formatting, never delivery, and the
+    `::warning` annotation keeps the malfunction visible instead of trading a red check
+    for a silent one."""
     merge_model = merge_model or MERGE_MODEL or MODEL
     passes_block = "\n\n".join(
         f"=== PASS {i+1} of {len(passes)} (independent) ===\n{p}"
@@ -658,11 +666,16 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
             else:
                 key = os.environ.get("OPENROUTER_API_KEY", "").strip()
                 out = _chat(OPENROUTER_BASE, key, merge_model, prompt, attempt_meta)
-        except Exception as e:  # noqa: BLE001 — transient HTTP failures retry like empties
-            out = ""
-            reason = f"raised {type(e).__name__}: {str(e)[:120]}"
+        # Deliberately broad: this function's contract is that it never raises, so any
+        # exception has to become a fallback rather than an escape. It is not swallowed
+        # silently — the type and message go into the annotation below, so a genuine bug
+        # (say an AttributeError from a bad refactor) reads as "raised AttributeError",
+        # not as a model flake.
+        except Exception as e:  # noqa: BLE001
+            # Bind to a second name: Python unbinds the `as` target at block exit.
+            out, err = "", e
         else:
-            reason = "returned no usable content"
+            err = None
         # A flaked attempt still bills for the tokens it burned (a reasoning-burn empty is
         # the *expensive* failure), so accumulate rather than overwrite: reporting only the
         # winning attempt would understate real spend on exactly the runs that cost most.
@@ -671,6 +684,8 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
                 meta[field] = meta.get(field, 0) + value
         if out:
             return out
+        reason = (f"raised {type(err).__name__}: {str(err)[:120]}" if err is not None
+                  else "returned no usable content")
         failures.append(reason)
         log(f"merge ({MERGE_PROVIDER}/{merge_model}) attempt {attempt}/2 {reason}")
     # Report BOTH reasons, not just the last. The attempts can fail differently, and the
@@ -688,6 +703,29 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
              "unmerged; findings may repeat or disagree between passes)*"]
     parts += [f"### Pass {i+1} of {len(passes)}\n\n{p}" for i, p in enumerate(passes)]
     return "\n\n---\n\n".join(parts)
+
+
+def _clip_review_body(review_body: str, reserved: int, limit: int = COMMENT_MAX) -> str:
+    """Trim the review body so the assembled comment fits under GitHub's comment cap.
+
+    Losing the tail of a long review is a bad outcome; losing the *whole* review to a 422
+    is a worse one, and that is the silent-failure class this reviewer exists to avoid.
+    Only the body is clipped — the marker leads the comment and idempotency is a
+    `startswith` match, so dedup keeps working — and `reserved` holds room for the header
+    and footer so the cost line survives too."""
+    room = limit - reserved
+    notice = "\n\n*(review truncated to fit GitHub's comment size limit — see the run log)*"
+    if room <= 0:
+        # Pathological: header+footer alone fill the cap. Nothing useful to salvage.
+        return notice.strip()
+    if len(review_body) <= room:
+        return review_body
+    keep = max(0, room - len(notice))
+    log(f"review body {len(review_body)}c exceeds the comment cap — clipping to {keep}c")
+    _annotate("warning",
+              f"review body clipped to fit GitHub's {limit}-char comment limit "
+              f"({len(review_body)}c → {keep}c) — the tail is in the run log/artifacts")
+    return review_body[:keep].rstrip() + notice
 
 
 def _cost_footer(total_cost: float, tokens: int, estimated: bool) -> str:
@@ -866,13 +904,16 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         # Don't claim a union that didn't happen — on the merge-fallback path the passes
         # are posted raw, so the header says so instead of advertising "union ×K".
         pass_label = f"union ×{k}" if merged else f"×{k} unmerged"
-    body = HEADER.format(marker=MARKER.format(sha=sha), pass_label=pass_label,
-                         model=model, body=review_body)
     # Pass-derived costs are list-price estimates (pi does not price custom OpenRouter
     # models), so label the total as an estimate regardless of whether a pass degraded.
-    body += _cost_footer(total_cost, total_tokens, estimated=True)
+    footer = _cost_footer(total_cost, total_tokens, estimated=True)
     if truncated:
-        body += "\n\n*(diff truncated to fit context — coverage is partial)*"
+        footer += "\n\n*(diff truncated to fit context — coverage is partial)*"
+    marker = MARKER.format(sha=sha)
+    shell = HEADER.format(marker=marker, pass_label=pass_label, model=model, body="")
+    review_body = _clip_review_body(review_body, len(shell) + len(footer))
+    body = HEADER.format(marker=marker, pass_label=pass_label,
+                         model=model, body=review_body) + footer
 
     if dry_run:
         print("\n" + "=" * 72 + f"\nDRY RUN — would post to #{pr}:\n" + "=" * 72 + f"\n{body}\n")

@@ -134,6 +134,8 @@ def test_review_pr_header_says_unmerged_when_the_merge_fell_back():
     import contextlib
     import io
     real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
     run.K = 2
     real_deps = _stub_review_pr_deps()
 
@@ -154,8 +156,51 @@ def test_review_pr_header_says_unmerged_when_the_merge_fell_back():
         assert "union ×2" not in body, body
     finally:
         run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+        run.PROVIDER = real_provider
         _restore_review_pr_deps(real_deps)
         run._annotate = _REAL_ANNOTATE
+
+
+def test_posted_body_is_clipped_under_githubs_comment_limit():
+    # The unmerged fallback concatenates K raw passes with no dedup, so it is strictly
+    # larger than the merged body would have been. Over GitHub's 65536-char cap the post
+    # 422s, the exception escapes review_pr, and sweep files it as a silent failure —
+    # exit 2 with NO review, the exact outcome the fallback exists to prevent.
+    import contextlib
+    import io
+    real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
+    run.K = 3
+    real_deps = _stub_review_pr_deps()
+    huge = "x" * 40000
+    run.merge_reviews = lambda pr, title, passes, merge_model=None, meta=None: "\n".join(passes)
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult(huge, "ok")
+    ann = _capture_annotations()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+        assert out.posted is True
+        # The dry-run print wraps the body in banners, so bound the body itself.
+        body = buf.getvalue()
+        assert len(body) < run.COMMENT_MAX + 2000, len(body)
+        assert "truncated to fit GitHub's comment size limit" in body
+        assert any("clipped" in m for _lvl, m in ann), ann
+    finally:
+        run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+        run.PROVIDER = real_provider
+        _restore_review_pr_deps(real_deps)
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_clip_review_body_preserves_short_bodies_and_marker_position():
+    # A body that fits is returned byte-identical (no gratuitous rewriting), and clipping
+    # only ever touches the body — the marker leads the comment and dedup is a startswith.
+    assert run._clip_review_body("short", reserved=100) == "short"
+    clipped = run._clip_review_body("y" * 5000, reserved=0, limit=1000)
+    assert len(clipped) <= 1000
+    assert clipped.startswith("yyy") and "truncated" in clipped
 
 
 def test_merge_reviews_accumulates_cost_across_a_retried_attempt():
@@ -318,6 +363,11 @@ def test_review_pr_parallel_passes_run_concurrently_and_keep_order():
     import threading
     barrier = threading.Barrier(3, timeout=10)
     real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    # Pin the provider: the parallel branch gates on PROVIDER == "openrouter", so under a
+    # PROVIDER=local environment (a supported config) these would silently test the
+    # sequential path and fail on the barrier/session-dir assertions.
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
     run.K = 3
     real_deps = _stub_review_pr_deps()
     merged = {}
@@ -343,6 +393,7 @@ def test_review_pr_parallel_passes_run_concurrently_and_keep_order():
         assert merged["passes"] == ["pass-0", "pass-2"]  # index order kept, empty dropped
     finally:
         run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+        run.PROVIDER = real_provider
         _restore_review_pr_deps(real_deps)
         run._annotate = _REAL_ANNOTATE
 
@@ -352,6 +403,11 @@ def test_review_pr_parallel_passes_get_distinct_session_dirs():
     # pass absorb its siblings' usage (the prior-files exclusion is a snapshot taken per
     # pass), double-counting cost. Each pass must get its own subdir under PI_SESSION_DIR.
     real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    # Pin the provider: the parallel branch gates on PROVIDER == "openrouter", so under a
+    # PROVIDER=local environment (a supported config) these would silently test the
+    # sequential path and fail on the barrier/session-dir assertions.
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
     run.K = 3
     real_deps = _stub_review_pr_deps()
     run.merge_reviews = lambda pr, title, passes, merge_model=None, meta=None: "MERGED"
@@ -374,6 +430,7 @@ def test_review_pr_parallel_passes_get_distinct_session_dirs():
         finally:
             os.environ.pop("PI_SESSION_DIR", None)
             run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+            run.PROVIDER = real_provider
             _restore_review_pr_deps(real_deps)
             run._annotate = _REAL_ANNOTATE
 
@@ -748,17 +805,44 @@ def test_finish_pass_redacts_persisted_transcript():
 
 
 def test_model_prices_retries_after_transient_failure():
+    # Pin the provider: _model_prices short-circuits to a cached None under
+    # PROVIDER=local (the offline invariant — never hit a cloud pricing endpoint), so
+    # without this the whole test asserts the wrong code path and fails.
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
     run._PRICE_CACHE.clear()
-    # transient network failure: not cached, so the daemon retries next sweep
-    def boom(*a, **k):
-        raise TimeoutError("provider blip")
-    run.requests.get = boom
-    assert run._model_prices("m") is None
-    assert "m" not in run._PRICE_CACHE
-    # a successful lookup (model absent from list) IS cached as None -- no price, no retry
-    run.requests.get = lambda *a, **k: _Resp({"data": [{"id": "other-model"}]})
-    assert run._model_prices("m") is None
-    assert "m" in run._PRICE_CACHE
+    try:
+        # transient network failure: not cached, so the daemon retries next sweep
+        def boom(*a, **k):
+            raise TimeoutError("provider blip")
+        run.requests.get = boom
+        assert run._model_prices("m") is None
+        assert "m" not in run._PRICE_CACHE
+        # a successful lookup (model absent from list) IS cached as None -- no price, no retry
+        run.requests.get = lambda *a, **k: _Resp({"data": [{"id": "other-model"}]})
+        assert run._model_prices("m") is None
+        assert "m" in run._PRICE_CACHE
+    finally:
+        run.PROVIDER = real_provider
+
+
+def test_model_prices_stays_offline_under_local_provider():
+    # The repo invariant: PROVIDER=local never reaches a cloud pricing endpoint. Locking
+    # it down, since the test above now pins the provider and would otherwise be the only
+    # coverage of _model_prices.
+    real_provider = run.PROVIDER
+    run.PROVIDER = "local"
+    run._PRICE_CACHE.clear()
+
+    def fail(*a, **k):
+        raise AssertionError("PROVIDER=local must not hit the pricing endpoint")
+
+    run.requests.get = fail
+    try:
+        assert run._model_prices("m") is None
+    finally:
+        run.PROVIDER = real_provider
+        run._PRICE_CACHE.clear()
 
 
 def test_parse_max_tokens_rejects_non_numeric_and_defaults_blank():

@@ -15,7 +15,17 @@ All notable changes to this project are documented here. The format follows
   previously a single empty-content 200 after K successful passes discarded all of them and
   turned the required check red. `merge_reviews()` no longer raises. Cost/token accounting
   sums every attempt, so a retried merge reports what it actually spent rather than only
-  the winning call.
+  the winning call, and when both attempts fail the annotation names *both* reasons — a
+  `402` followed by an empty 200 is credits exhaustion, not a model flake, and collapsing
+  to the last reason hid the actionable one. The posted header reads `×K unmerged` on that
+  path rather than claiming a `union ×K` that did not happen.
+- **An oversized review is now clipped instead of lost.** GitHub rejects a comment body
+  over 65536 characters, and nothing bounded the posted review (`max-diff-chars` caps the
+  *input*). An over-cap body failed the post, and the error surfaced as a silent failure —
+  exit 2 with no review at all. The body is now trimmed to fit, behind a truncation note
+  and a `::warning`; the marker and cost footer are preserved so idempotency and reporting
+  still work. This mattered most on the new unmerged-fallback path, whose body concatenates
+  the K raw passes with no dedup and is therefore larger than the merged body would be.
 
 ## [1.3.0] - 2026-08-04
 
