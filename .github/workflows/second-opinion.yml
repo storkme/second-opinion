@@ -54,3 +54,28 @@ jobs:
           # If this trips again, the lever is the diff/prompt size or the model, not
           # another timeout bump.
           pass-timeout-seconds: "1800"
+          # Keep the per-pass transcripts so a degraded pass is diagnosable after the
+          # fact. Without this the session goes to a throwaway dir, gets read for the
+          # cost footer, and is deleted — which is exactly what happened to the #29
+          # runaway (12.6M tokens, $1.96, zero output): the numbers survived, the
+          # evidence did not, so the loop it was stuck in is unrecoverable.
+          # NOT a dotted path: upload-artifact@v4 excludes hidden files by default, so
+          # `.second-opinion` uploads nothing while reporting success (learned the hard
+          # way downstream).
+          # Container path: the action is a docker action, and the runner workspace is
+          # mounted at /github/workspace inside it. `${{ github.workspace }}` is the
+          # RUNNER-side path and does not exist in the container — the upload step
+          # below uses that form because it runs on the runner. Same directory, two
+          # namespaces; passing the runner path here would write nowhere useful.
+          session-dir: /github/workspace/second-opinion-sessions
+      - name: Upload review session transcripts
+        # `always()` — a degraded run is precisely when the transcript matters.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: second-opinion-sessions-${{ github.event.pull_request.number }}
+          path: ${{ github.workspace }}/second-opinion-sessions
+          include-hidden-files: true
+          # `warn`, not `ignore`: a silently empty upload is how the downstream copy of
+          # this step did nothing for a day while reporting success.
+          if-no-files-found: warn
