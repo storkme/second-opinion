@@ -13,12 +13,26 @@ concurrency:                       # one run per PR; a new push cancels the old
 
 jobs:
   review:
-    # Same-repo PRs only, so the key is never exposed to a fork.
+    # Same-repo, non-Dependabot PRs only. The fork guard keeps the key off untrusted
+    # branches. The Dependabot guard is not about trust: Dependabot-triggered runs read
+    # from GitHub's *separate* Dependabot secret store, so `secrets.OPENROUTER_API_KEY`
+    # arrives empty and the job dies with "Missing required environment variable" — a
+    # guaranteed red check on every dependency bump. Copying the key into that store
+    # would fix the symptom by handing it to every automated bump run; a version-bump
+    # diff is not worth a review anyway.
     if: |
       github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Must stay comfortably above the 1500s pass timeout below: if the job cap fires
+    # first it cancels mid-pass, which skips the degraded path entirely — no annotation,
+    # no failure notice, just a job-level kill — so a hit here is strictly worse than a
+    # pass timeout. 35min leaves 600s of slack, the same margin the old 25min/900s pair
+    # had. Measured pre-pass overhead (container build + checkout) is ~30s across recent
+    # runs — the action's image is rebuilt per run, and this Dockerfile builds in ~28s —
+    # so 600s is ~20x the observed need and costs nothing when unused.
+    timeout-minutes: 35
     permissions:
       contents: read
       pull-requests: write
@@ -28,3 +42,15 @@ jobs:
         with:
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           guidance-file: .github/review-guidance.md
+          # This repo's own PRs outgrew the 900s default: an agentic pass on a large diff
+          # with a reasoning model hits the wall and reds the check as degraded, with no
+          # review — reviewer malfunction reported as if it were a verdict. Observed on
+          # #21 (900s timeout) after two completed runs on the same PR burned 502k then
+          # 923k tokens as the diff grew. A dogfood check that fails on its own medium
+          # PRs teaches you to ignore it, which is the one thing this tripwire cannot
+          # afford. This raises the ceiling, it does not remove it: a pass that genuinely
+          # needs >1500s still reds the check as degraded, since the underlying cause (a
+          # reasoning model outrunning the wall clock as the diff grows) is unaddressed.
+          # If this trips again, the lever is the diff/prompt size or the model, not
+          # another timeout bump.
+          pass-timeout-seconds: "1500"
