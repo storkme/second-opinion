@@ -20,7 +20,11 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Must stay comfortably above the action's pass-timeout-seconds (default 1800s).
+    # If the job cap fires first it cancels mid-pass, skipping the degraded report
+    # entirely — no annotation, no failure notice — which is strictly worse than a
+    # pass timeout. 40min leaves 600s of slack.
+    timeout-minutes: 40
     permissions:
       contents: read
       pull-requests: write

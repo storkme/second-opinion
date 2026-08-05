@@ -49,7 +49,7 @@ jobs:
           # 923k tokens as the diff grew. A dogfood check that fails on its own medium
           # PRs teaches you to ignore it, which is the one thing this tripwire cannot
           # afford. This raises the ceiling, it does not remove it: a pass that genuinely
-          # needs >1500s still reds the check as degraded, since the underlying cause (a
+          # needs >1800s still reds the check as degraded, since the underlying cause (a
           # reasoning model outrunning the wall clock as the diff grows) is unaddressed.
           # If this trips again, the lever is the diff/prompt size or the model, not
           # another timeout bump.

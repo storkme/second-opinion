@@ -15,7 +15,8 @@ codebase is most likely to break. Read `CLAUDE.md` first for the architecture an
   `LLAMA_SERVER_URL/v1/models`; `resolve_model()` returning `None` must SKIP the run (cron/
   daemon-safe), never crash or post an empty review.
 - **Env-var contract.** New knobs must have a default and be validated where required.
-  Provider-aware defaults (`K`: 1 openrouter / 3 local; `PASS_TIMEOUT_S`: 900 / 1800) must
+  Provider-aware defaults (`K`: 1 openrouter / 3 local — `PASS_TIMEOUT_S` is no longer
+  provider-aware, it is 1800 for both) must
   stay consistent between `run.py` and the docs/action inputs. Upfront credential checks in
   `main()` must cover both `PROVIDER` and `MERGE_PROVIDER`.
 - **Defensive HTTP parsing.** `_chat()` must tolerate any malformed-but-200 envelope
