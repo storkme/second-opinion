@@ -903,30 +903,37 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         return ReviewOutcome(False, True)
 
     if truncated:
+        # Write FIRST, then report — so there is exactly one annotation and it describes
+        # what actually happened. Announcing "full diff supplied on disk" and then failing
+        # to write it would be two contradictory warnings, and the optimistic one is the
+        # one a reader believes.
+        write_err = ""
+        try:
+            with open(os.path.join(wt, FULL_DIFF_NAME), "w", encoding="utf-8") as fh:
+                fh.write(full_text)
+        except OSError as e:
+            # Non-fatal: the excerpt still yields a review. But the agent now has no way to
+            # reach the remainder, so clear the pointer (or the prompt sends it to read a
+            # file that isn't there) and make every downstream claim reflect that.
+            full_diff_rel = ""
+            write_err = " ".join(str(e).split())[:120]
         # Loud, and specific about what was dropped. A count buried in the comment footer
         # reads the same at 1-of-16 as at 15-of-16; the annotation names the files so
         # partial coverage cannot be mistaken for full coverage in the checks UI.
         pct = 100 * len(filtered) // max(1, len(full_text))
         listed = ", ".join(dropped[:10]) + (f", +{len(dropped) - 10} more"
                                             if len(dropped) > 10 else "")
+        tail = (f"full diff supplied on disk, but coverage of the remainder depends on the "
+                f"agent reading it" if full_diff_rel else
+                f"and the full diff could NOT be written ({write_err}) — this review covers "
+                f"the excerpt ONLY")
         log(f"#{pr}: diff truncated — excerpt has {len(files)}/{len(files) + len(dropped)} "
-            f"files ({pct}% of the filtered diff); full diff written to {FULL_DIFF_NAME}")
+            f"files ({pct}% of the filtered diff); "
+            f"{'full diff written to ' + FULL_DIFF_NAME if full_diff_rel else 'WRITE FAILED: ' + write_err}")
         _annotate("warning",
                   f"#{pr}: prompt excerpt covers {len(files)} of "
                   f"{len(files) + len(dropped)} changed files ({pct}% of the filtered diff) "
-                  f"— full diff supplied on disk, but coverage of the remainder depends on "
-                  f"the agent reading it. Not in the excerpt: {listed}")
-        try:
-            with open(os.path.join(wt, FULL_DIFF_NAME), "w", encoding="utf-8") as fh:
-                fh.write(full_text)
-        except OSError as e:
-            # Non-fatal: the excerpt still yields a review. But the agent now has no way
-            # to reach the remainder, so say so rather than letting it pass as coverage —
-            # and clear the pointer, or the prompt sends it to read a file that isn't there.
-            full_diff_rel = ""
-            _annotate("warning",
-                      f"#{pr}: could not write the full diff for the agent "
-                      f"({' '.join(str(e).split())[:120]}) — review is limited to the excerpt")
+                  f"— {tail}. Not in the excerpt: {listed}")
 
     passes: list[str] = []
     degraded = False
@@ -1003,10 +1010,18 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     footer = _cost_footer(total_cost, total_tokens, estimated=True)
     if truncated:
         # Name the numbers. "coverage is partial" reads identically at 1-of-16 and 15-of-16,
-        # and the reader has no way to tell which they got.
-        footer += (f"\n\n*(prompt excerpt covered {len(files)} of {len(files) + len(dropped)} "
-                   f"changed files; the full diff was supplied to the agent on disk. "
-                   f"Coverage of the remainder depends on it having read that.)*")
+        # and the reader has no way to tell which they got. Gate the on-disk claim on
+        # `full_diff_rel` — the honest signal — or a failed write would have the footer
+        # advertising coverage the agent never had, which is this PR's own bug relocated.
+        seen_of = f"{len(files)} of {len(files) + len(dropped)}"
+        if full_diff_rel:
+            footer += (f"\n\n*(prompt excerpt covered {seen_of} changed files; the full diff "
+                       f"was supplied to the agent on disk. Coverage of the remainder "
+                       f"depends on it having read that.)*")
+        else:
+            footer += (f"\n\n*(prompt excerpt covered {seen_of} changed files, and the full "
+                       f"diff could not be supplied — this review covers that excerpt "
+                       f"**only**.)*")
     marker = MARKER.format(sha=sha)
     shell = HEADER.format(marker=marker, pass_label=pass_label, model=model, body="")
     # Reserve in bytes, matching _clip_review_body's budget — the shell is not ASCII.

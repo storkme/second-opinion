@@ -407,6 +407,64 @@ def _multifile_diff(n_files, chunk_chars):
     return "".join(parts)
 
 
+def _drive_review_pr_body(pr, diff, max_chars, make_worktree=True):
+    """Like _drive_review_pr but returns the posted comment body (via the dry-run print)."""
+    import contextlib
+    import io
+    import shutil
+    real = (run.K, run.run_pass, run.merge_reviews, run.MAX_DIFF_CHARS, run.PROVIDER)
+    run.K, run.PROVIDER, run.MAX_DIFF_CHARS = 1, "openrouter", max_chars
+    real_deps = _stub_review_pr_deps()
+    run._gh = lambda args, timeout_s=60: diff
+    wt = os.path.join(tempfile.gettempdir(), f"second-opinion-pr{pr}")
+    shutil.rmtree(wt, ignore_errors=True)
+    if make_worktree:
+        os.makedirs(wt, exist_ok=True)
+    run.run_pass = lambda w, m, s, u, session_dir=None: run.PassResult("finding", "ok")
+    _capture_annotations()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            run.review_pr(pr, "t", "cafebabe00", "m", "m", dry_run=True)
+        return buf.getvalue(), wt
+    finally:
+        run.K, run.run_pass, run.merge_reviews, run.MAX_DIFF_CHARS, run.PROVIDER = real
+        _restore_review_pr_deps(real_deps)
+        run._annotate = _REAL_ANNOTATE
+        shutil.rmtree(wt, ignore_errors=True)
+
+
+def test_footer_does_not_claim_an_on_disk_diff_that_was_never_written():
+    # The failure this whole change exists to kill is "partial coverage reads as full".
+    # A failed write must not leave the footer advertising coverage the agent never had.
+    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    body, _ = _drive_review_pr_body(4245, diff, max_chars=2500, make_worktree=False)
+    assert "could not be supplied" in body, body[-600:]
+    assert "supplied to the agent on disk" not in body, body[-600:]
+    assert "covers that excerpt" in body
+
+    # ...and when the write succeeds the footer says so, with the real numbers.
+    body, _ = _drive_review_pr_body(4246, diff, max_chars=2500, make_worktree=True)
+    assert "supplied to the agent on disk" in body, body[-600:]
+    assert "could not be supplied" not in body
+    assert "1 of 6 changed files" in body, body[-600:]
+
+
+def test_truncation_emits_exactly_one_coverage_annotation():
+    # Two warnings that contradict each other is worse than one that is accurate: the
+    # optimistic one is the one a reader believes.
+    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    for make_wt in (True, False):
+        _, ann, _ = _drive_review_pr(4247 if make_wt else 4248, diff, 2500,
+                                     make_worktree=make_wt)
+        cov = [m for lvl, m in ann if lvl == "warning" and "changed files" in m]
+        assert len(cov) == 1, cov
+        if make_wt:
+            assert "supplied on disk" in cov[0]
+        else:
+            assert "could NOT be written" in cov[0] and "excerpt ONLY" in cov[0]
+
+
 def _drive_review_pr(pr, diff, max_chars, make_worktree=True):
     """Run review_pr against a stubbed world; return (prompt, annotations, worktree)."""
     import shutil
@@ -481,7 +539,8 @@ def test_failed_full_diff_write_does_not_point_the_agent_at_a_missing_file():
     assert not os.path.exists(os.path.join(wt, run.FULL_DIFF_NAME))
     assert run.FULL_DIFF_NAME not in prompt, "prompt still points at an unwritten file"
     assert "TRUNCATED" not in prompt
-    assert [m for lvl, m in ann if lvl == "warning" and "could not write the full diff" in m], ann
+    assert [m for lvl, m in ann
+            if lvl == "warning" and "could NOT be written" in m and "excerpt ONLY" in m], ann
 
 
 def test_review_pr_parallel_passes_run_concurrently_and_keep_order():
