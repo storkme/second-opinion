@@ -44,7 +44,10 @@ All notable changes to this project are documented here. The format follows
     "coverage is partial", which reads identically at 1-of-16 and 15-of-16.
 
   Coverage of the remainder is now *reachable* rather than *guaranteed* — it depends on the
-  agent actually reading the file — and the annotation and footer both say so.
+  agent actually reading the file — and the annotation and footer both say so. If the write
+  itself fails, the agent is still told the excerpt is truncated and which files are missing
+  (it just gets no pointer, and is told to read the checkout rather than to `git diff`, which
+  a shallow checkout with no base ref cannot do).
 
 ## [1.4.0] - 2026-08-05
 

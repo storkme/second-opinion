@@ -143,6 +143,11 @@ def _excluded(path: str, globs: list[str]) -> bool:
     return any(_glob_to_re(g).match(path) for g in globs)
 
 
+# Appended to a truncated diff. Exported so callers measuring coverage can subtract it
+# instead of comparing an excerpt that carries it against a full diff that doesn't.
+TRUNCATION_TRAILER = "\n\n[... diff truncated for length ...]\n"
+
+
 def filter_diff(diff: str, exclude_globs: list[str], max_chars: int) -> tuple[str, list[str], bool]:
     """Drop excluded/generated files and cap total size at whole-file boundaries.
     Returns (diff, files, truncated)."""
@@ -170,7 +175,7 @@ def filter_diff(diff: str, exclude_globs: list[str], max_chars: int) -> tuple[st
             break
     joined = "".join(out)
     if truncated:
-        joined += "\n\n[... diff truncated for length ...]\n"
+        joined += TRUNCATION_TRAILER
     return joined, files, truncated
 
 

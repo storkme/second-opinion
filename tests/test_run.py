@@ -531,14 +531,23 @@ def test_untruncated_diff_adds_no_file_and_no_truncation_note():
         shutil.rmtree(wt, ignore_errors=True)
 
 
-def test_failed_full_diff_write_does_not_point_the_agent_at_a_missing_file():
-    # If the write fails the pointer must be withdrawn — otherwise the prompt sends the
-    # agent to read a file that isn't there, which is a quieter version of the same bug.
+def test_failed_write_still_tells_the_agent_the_diff_is_truncated():
+    # Disclosure and pointer are separate concerns. A failed write means the agent cannot
+    # READ the rest — it does not mean the agent should be left believing the excerpt is
+    # the whole change. Gating both on the pointer put the original bug back one branch
+    # over, and the previous version of this test asserted that bug as correct.
     diff = _multifile_diff(n_files=6, chunk_chars=2000)
     prompt, ann, wt = _drive_review_pr(4244, diff, max_chars=2500, make_worktree=False)
     assert not os.path.exists(os.path.join(wt, run.FULL_DIFF_NAME))
-    assert run.FULL_DIFF_NAME not in prompt, "prompt still points at an unwritten file"
-    assert "TRUNCATED" not in prompt
+    # The pointer is withdrawn — never send the agent to a file that isn't there...
+    assert run.FULL_DIFF_NAME not in prompt, "prompt points at an unwritten file"
+    # ...but the truncation itself is still disclosed, with the missing files named.
+    assert "TRUNCATED" in prompt, "agent was handed a partial diff with no disclosure"
+    assert "1 of 6 changed files" in prompt
+    assert "src/f05.rs" in prompt
+    # It is told to read the checkout, and explicitly NOT to diff (shallow, no base ref).
+    assert "checked out at the PR's head commit" in prompt
+    assert "cannot diff them against the base" in prompt
     assert [m for lvl, m in ann
             if lvl == "warning" and "could NOT be written" in m and "excerpt ONLY" in m], ann
 

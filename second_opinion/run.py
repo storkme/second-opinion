@@ -876,19 +876,37 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
                 f"directory at the PR's head commit. Use your tools (read, grep via bash) "
                 f"to inspect callers, tests, and definitions as needed. The change to "
                 f"review is this diff:\n\n{diff_text}\n")
-        if not full_diff_rel:
+        # Disclosure and pointer are SEPARATE concerns. Whether the on-disk copy exists
+        # changes what the agent can do about truncation; it never changes whether the
+        # agent needs to know it happened. Gating both on the pointer left the failure
+        # path handing over a 1-of-16-file excerpt with no hint it was partial — the very
+        # bug this whole change exists to kill, reintroduced one branch over.
+        if not truncated:
             return turn
         shown = len(files)
         listed = "".join(f"  - {p}\n" for p in dropped[:60])
         if len(dropped) > 60:
             listed += f"  - ... and {len(dropped) - 60} more\n"
-        turn += (
-            f"\nIMPORTANT — the diff above is TRUNCATED: it carries only {shown} of "
-            f"{shown + len(dropped)} changed files. The COMPLETE diff is in your working "
-            f"directory at `./{full_diff_rel}` (it is not part of the PR — it was placed "
-            f"there for you). READ IT before you conclude; treat the excerpt above as a "
-            f"starting point, not the change. Prioritise source files over generated "
-            f"artifacts. Files changed by this PR but absent from the excerpt:\n{listed}")
+        turn += (f"\nIMPORTANT — the diff above is TRUNCATED: it carries only {shown} of "
+                 f"{shown + len(dropped)} changed files. ")
+        if full_diff_rel:
+            turn += (f"The COMPLETE diff is in your working directory at "
+                     f"`./{full_diff_rel}` (it is not part of the PR — it was placed there "
+                     f"for you). READ IT before you conclude. ")
+        else:
+            # No on-disk copy. The checkout is still there, so the agent can read the
+            # current state of the named files — but NOT diff them: the consumer's
+            # checkout is shallow and the base ref is never fetched, so telling it to run
+            # `git diff` would just produce a confident failure.
+            turn += ("The complete diff could NOT be provided this run. The repository is "
+                     "checked out at the PR's head commit, so read the files named below "
+                     "to see their current state — but you cannot diff them against the "
+                     "base (the checkout is shallow and the base ref is absent), so report "
+                     "that your view of those files is partial rather than implying you "
+                     "reviewed the change to them. ")
+        turn += (f"Treat the excerpt above as a starting point, not the change. Prioritise "
+                 f"source files over generated artifacts. Files changed by this PR but "
+                 f"absent from the excerpt:\n{listed}")
         return turn
 
     _git(["worktree", "remove", "--force", wt], check=False)
@@ -902,44 +920,50 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         _post_failure_notice(pr, sha, dry_run, checkout=True)
         return ReviewOutcome(False, True)
 
-    if truncated:
-        # Write FIRST, then report — so there is exactly one annotation and it describes
-        # what actually happened. Announcing "full diff supplied on disk" and then failing
-        # to write it would be two contradictory warnings, and the optimistic one is the
-        # one a reader believes.
-        write_err = ""
-        try:
-            with open(os.path.join(wt, FULL_DIFF_NAME), "w", encoding="utf-8") as fh:
-                fh.write(full_text)
-        except OSError as e:
-            # Non-fatal: the excerpt still yields a review. But the agent now has no way to
-            # reach the remainder, so clear the pointer (or the prompt sends it to read a
-            # file that isn't there) and make every downstream claim reflect that.
-            full_diff_rel = ""
-            write_err = " ".join(str(e).split())[:120]
-        # Loud, and specific about what was dropped. A count buried in the comment footer
-        # reads the same at 1-of-16 as at 15-of-16; the annotation names the files so
-        # partial coverage cannot be mistaken for full coverage in the checks UI.
-        pct = 100 * len(filtered) // max(1, len(full_text))
-        listed = ", ".join(dropped[:10]) + (f", +{len(dropped) - 10} more"
-                                            if len(dropped) > 10 else "")
-        tail = (f"full diff supplied on disk, but coverage of the remainder depends on the "
-                f"agent reading it" if full_diff_rel else
-                f"and the full diff could NOT be written ({write_err}) — this review covers "
-                f"the excerpt ONLY")
-        log(f"#{pr}: diff truncated — excerpt has {len(files)}/{len(files) + len(dropped)} "
-            f"files ({pct}% of the filtered diff); "
-            f"{'full diff written to ' + FULL_DIFF_NAME if full_diff_rel else 'WRITE FAILED: ' + write_err}")
-        _annotate("warning",
-                  f"#{pr}: prompt excerpt covers {len(files)} of "
-                  f"{len(files) + len(dropped)} changed files ({pct}% of the filtered diff) "
-                  f"— {tail}. Not in the excerpt: {listed}")
-
     passes: list[str] = []
     degraded = False
     total_cost = 0.0
     total_tokens = 0
     try:
+        # Inside the try: log()/_annotate() print, and a BrokenPipeError here
+        # would otherwise escape review_pr with the worktree still on disk.
+        if truncated:
+            # Write FIRST, then report — so there is exactly one annotation and it describes
+            # what actually happened. Announcing "full diff supplied on disk" and then failing
+            # to write it would be two contradictory warnings, and the optimistic one is the
+            # one a reader believes.
+            write_err = ""
+            try:
+                with open(os.path.join(wt, FULL_DIFF_NAME), "w", encoding="utf-8") as fh:
+                    fh.write(full_text)
+            except OSError as e:
+                # Non-fatal: the excerpt still yields a review. But the agent now has no way to
+                # reach the remainder, so clear the pointer (or the prompt sends it to read a
+                # file that isn't there) and make every downstream claim reflect that.
+                full_diff_rel = ""
+                write_err = " ".join(str(e).split())[:120]
+            # Loud, and specific about what was dropped. A count buried in the comment footer
+            # reads the same at 1-of-16 as at 15-of-16; the annotation names the files so
+            # partial coverage cannot be mistaken for full coverage in the checks UI.
+            # Subtract the trailer filter_diff appends to a truncated excerpt: full_text has
+            # none, so counting it would compare an excerpt against a differently-shaped whole.
+            excerpt_chars = len(filtered)
+            if filtered.endswith(rv.TRUNCATION_TRAILER):
+                excerpt_chars -= len(rv.TRUNCATION_TRAILER)
+            pct = 100 * excerpt_chars // max(1, len(full_text))
+            listed = ", ".join(dropped[:10]) + (f", +{len(dropped) - 10} more"
+                                                if len(dropped) > 10 else "")
+            tail = (f"full diff supplied on disk, but coverage of the remainder depends on the "
+                    f"agent reading it" if full_diff_rel else
+                    f"and the full diff could NOT be written ({write_err}) — this review covers "
+                    f"the excerpt ONLY")
+            log(f"#{pr}: diff truncated — excerpt has {len(files)}/{len(files) + len(dropped)} "
+                f"files ({pct}% of the filtered diff); "
+                f"{'full diff written to ' + FULL_DIFF_NAME if full_diff_rel else 'WRITE FAILED: ' + write_err}")
+            _annotate("warning",
+                      f"#{pr}: prompt excerpt covers {len(files)} of "
+                      f"{len(files) + len(dropped)} changed files ({pct}% of the filtered diff) "
+                      f"— {tail}. Not in the excerpt: {listed}")
         msgs = [user_turn(filtered if i == 0 else rv.shuffle_inputs(filtered, i))
                 for i in range(K)]
         elapsed: dict = {}
