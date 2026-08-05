@@ -122,6 +122,8 @@ agentic path never used.
 | `EXCLUDE_GLOBS` | sensible set | comma-separated globs dropped from the diff |
 | `MAX_DIFF_CHARS` | `60000` | diff size cap (whole-file boundaries) |
 | `PASS_TIMEOUT_S` | `1800` | per-pass timeout (no provider split; the caller's job budget must exceed it) |
+| `MAX_PASS_TOKENS` | — (off) | abort a pass over this many tokens, reported as `runaway` not `timeout`. The clock bounds time, not spend. |
+| `MAX_PASS_COST_USD` | — (off) | same, in USD; depends on a price lookup that can fail, so prefer `MAX_PASS_TOKENS` |
 | `PI_SESSION_DIR` | — | when set, pi writes each pass's JSONL session transcript here instead of ephemeral `--no-session`. Point it at a path the consumer persists (e.g. upload as an artifact) so a blocked/empty pass is forensically inspectable. |
 | `TOOLS` | `read,bash` | pi tool grant; `read` drops shell (safer on untrusted authors) |
 | `PI_REASONING` | `true` | honored for **both** providers; set `false` for a non-reasoning model |

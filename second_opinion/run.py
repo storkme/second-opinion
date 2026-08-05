@@ -449,6 +449,32 @@ def _float_or_zero(value: object) -> float:
     return parsed if math.isfinite(parsed) else 0.0
 
 
+def _accumulate_usage(total: dict, usage) -> None:
+    """Fold one pi `Usage` record into a running total. Shared by the whole-file reader
+    and the watchdog's incremental one so the two cannot drift — pi's schema is camelCase
+    (`cacheRead`/`cacheWrite`/`totalTokens`), normalized to snake_case here."""
+    if not isinstance(usage, dict):
+        return
+    input_tokens = _int_or_zero(usage.get("input"))
+    output_tokens = _int_or_zero(usage.get("output"))
+    cache_read = _int_or_zero(usage.get("cacheRead") or usage.get("cache_read"))
+    cache_write = _int_or_zero(usage.get("cacheWrite") or usage.get("cache_write"))
+    total["input"] += input_tokens
+    total["output"] += output_tokens
+    total["cache_read"] += cache_read
+    total["cache_write"] += cache_write
+    raw_total = usage.get("totalTokens")
+    if raw_total is None:
+        raw_total = usage.get("total_tokens")
+    if raw_total is None:
+        total["total_tokens"] += input_tokens + output_tokens + cache_read + cache_write
+    else:
+        total["total_tokens"] += _int_or_zero(raw_total)
+    cost = usage.get("cost")
+    if isinstance(cost, dict):
+        total["cost_total"] += _float_or_zero(cost.get("total"))
+
+
 def _read_session_usage(session_dir: str, exclude: set = ()) -> dict:
     """Sum real token usage across the pi session JSONL file(s) in a dir, skipping files
     already present before the pass began (so a pass shares a persisted dir without
@@ -474,30 +500,7 @@ def _read_session_usage(session_dir: str, exclude: set = ()) -> dict:
                         if not line:
                             continue
                         entry = json.loads(line)
-                        usage = (entry.get("message") or {}).get("usage")
-                        if not isinstance(usage, dict):
-                            continue
-                        input_tokens = _int_or_zero(usage.get("input"))
-                        output_tokens = _int_or_zero(usage.get("output"))
-                        cache_read = _int_or_zero(usage.get("cacheRead")
-                                                  or usage.get("cache_read"))
-                        cache_write = _int_or_zero(usage.get("cacheWrite")
-                                                   or usage.get("cache_write"))
-                        total["input"] += input_tokens
-                        total["output"] += output_tokens
-                        total["cache_read"] += cache_read
-                        total["cache_write"] += cache_write
-                        raw_total = usage.get("totalTokens")
-                        if raw_total is None:
-                            raw_total = usage.get("total_tokens")
-                        if raw_total is None:
-                            total["total_tokens"] += (input_tokens + output_tokens
-                                                       + cache_read + cache_write)
-                        else:
-                            total["total_tokens"] += _int_or_zero(raw_total)
-                        cost = usage.get("cost")
-                        if isinstance(cost, dict):
-                            total["cost_total"] += _float_or_zero(cost.get("total"))
+                        _accumulate_usage(total, (entry.get("message") or {}).get("usage"))
             except (OSError, ValueError):
                 continue
     return total
@@ -521,6 +524,53 @@ def _finish_pass(model: str, session_dir: str, internal: bool, text: str, status
         # list-price estimate from real token counts.
         cost = _cost_from_usage(model, usage)
     return PassResult(text, status, cost=cost, tokens=tokens)
+
+
+class _UsageTail:
+    """Usage reader that only parses bytes appended since the last poll.
+
+    The watchdog exists to catch a pass producing a multi-MB transcript, so re-reading it
+    from byte 0 every poll would be O(n^2) precisely where it matters — and a parse that
+    outran the poll interval would add detection lag on top. Binary mode because text-mode
+    `tell()` is unusable after line iteration; a trailing partial line is left unconsumed
+    so the next poll sees it whole."""
+
+    def __init__(self, session_dir: str, exclude: set = ()):
+        self.dir = session_dir
+        self.exclude = set(exclude)
+        self.offsets: dict = {}
+        self.total = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
+                      "total_tokens": 0, "cost_total": 0.0}
+
+    def poll(self) -> dict:
+        if not self.dir or not os.path.isdir(self.dir):
+            return dict(self.total)
+        for root, _dirs, files in os.walk(self.dir):
+            for fn in files:
+                fp = os.path.join(root, fn)
+                if not fn.endswith(".jsonl") or fp in self.exclude:
+                    continue
+                try:
+                    with open(fp, "rb") as fh:
+                        fh.seek(self.offsets.get(fp, 0))
+                        raw = fh.read()
+                except OSError:
+                    continue
+                if not raw:
+                    continue
+                consumed = raw.rfind(b"\n") + 1
+                if not consumed:
+                    continue
+                self.offsets[fp] = self.offsets.get(fp, 0) + consumed
+                for line in raw[:consumed].decode("utf-8", "replace").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    _accumulate_usage(self.total, (entry.get("message") or {}).get("usage"))
+        return dict(self.total)
 
 
 def _spend_note(usage: dict, model: str) -> str:
@@ -600,15 +650,19 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         breach = {"why": ""}
         stop = threading.Event()
+        tail = _UsageTail(session_dir, prior_files)
 
         def _watch() -> None:
             while not stop.wait(BUDGET_POLL_S):
                 try:
-                    why = _budget_breach(
-                        _read_session_usage(session_dir, exclude=prior_files), model)
+                    why = _budget_breach(tail.poll(), model)
                 except Exception:  # noqa: BLE001 — a transient read must not kill a pass
                     continue
-                if why:
+                if why and proc.poll() is None:
+                    # Guard on "still running": a pass that finished naturally can have
+                    # final usage above the ceiling, and setting breach then would discard
+                    # a perfectly good review. kill() is a no-op on a reaped process, so
+                    # without this the flag alone would misreport it as a runaway.
                     breach["why"] = why
                     proc.kill()
                     return
@@ -637,7 +691,10 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
             return _finish_pass(model, session_dir, internal, "", "timeout", prior_files)
         finally:
             stop.set()
-        if breach["why"]:
+        # Belt and braces with the watchdog's poll() guard: classify as runaway only if
+        # the process really was killed (negative returncode), never if it exited on its
+        # own between the last poll and communicate() returning.
+        if breach["why"] and (proc.returncode or 0) < 0:
             # Killed for spend, not time. Reported as its own cause so the three failure
             # modes stop being indistinguishable in the checks UI.
             log(f"pi pass aborted — {breach['why']}")

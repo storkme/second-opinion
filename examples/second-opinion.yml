@@ -35,3 +35,8 @@ jobs:
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           model: z-ai/glm-5.2
           guidance-file: .github/review-guidance.md   # optional: this repo's checklist
+          # Optional spend ceiling. pass-timeout-seconds bounds TIME, not money — a
+          # looping agent can burn millions of tokens producing nothing, and a longer
+          # timeout only raises the bill. Off by default; set it once you know your
+          # repo's normal range, and an over-ceiling pass reports as `runaway`.
+          # max-pass-tokens: "5000000"

@@ -373,7 +373,7 @@ def test_transcript_is_redacted_even_when_the_pass_raises():
     import shutil
     key = "sk-or-v1-" + "a" * 40
     real_env = os.environ.get("OPENROUTER_API_KEY")
-    real_run = run.subprocess.run
+    real_run, real_popen = run.subprocess.run, run.subprocess.Popen
     session = tempfile.mkdtemp(prefix="so-raise-")
     os.environ["OPENROUTER_API_KEY"] = key
     os.environ["PI_SESSION_DIR"] = session
@@ -398,7 +398,7 @@ def test_transcript_is_redacted_even_when_the_pass_raises():
         assert key not in blob, "raw API key survived in a persisted transcript"
         assert "REDACTED" in blob, blob[:200]
     finally:
-        run.subprocess.run = real_run
+        run.subprocess.run, run.subprocess.Popen = real_run, real_popen
         os.environ.pop("PI_SESSION_DIR", None)
         if real_env is None:
             os.environ.pop("OPENROUTER_API_KEY", None)
@@ -440,6 +440,11 @@ def test_runaway_pass_is_killed_at_the_token_ceiling():
                 for _ in range(5):
                     fh.write('{"message":{"usage":{"totalTokens":900,"input":900}}}\n')
 
+        def poll(self):
+            # None while running: the watchdog must only trip on a live process, or a
+            # pass that finished naturally over the ceiling would lose its review.
+            return None if not killed["n"] else -9
+
         def communicate(self, input=None, timeout=None):
             import time
             for _ in range(200):           # outlive the watchdog, never the test
@@ -464,6 +469,52 @@ def test_runaway_pass_is_killed_at_the_token_ceiling():
     finally:
         run.subprocess.run, run.subprocess.Popen = real_run, real_popen
         run.BUDGET_POLL_S = real_poll
+        for k, v in saved.items():
+            setattr(run, k, v)
+        os.environ.pop("PI_SESSION_DIR", None)
+        run._annotate = _REAL_ANNOTATE
+        shutil.rmtree(session, ignore_errors=True)
+
+
+def test_a_pass_that_finishes_over_the_ceiling_keeps_its_review():
+    # The race: a pass can finish naturally with final usage above the ceiling. kill() is
+    # a no-op on a reaped process, so a watchdog that set its flag anyway would make the
+    # main thread discard a perfectly good review as a "runaway".
+    import shutil
+    saved = _spend_env(MAX_PASS_TOKENS=1000, MAX_PASS_COST_USD=0.0)
+    real_popen, real_poll = run.subprocess.Popen, run.BUDGET_POLL_S
+    run.BUDGET_POLL_S = 0.02
+    session = tempfile.mkdtemp(prefix="so-finished-")
+    os.environ["PI_SESSION_DIR"] = session
+
+    class FinishedPopen:
+        returncode = 0                     # exited on its own, not killed
+
+        def __init__(self, cmd, **k):
+            sd = cmd[cmd.index("--session-dir") + 1]
+            os.makedirs(sd, exist_ok=True)
+            with open(os.path.join(sd, "s.jsonl"), "w") as fh:
+                fh.write('{"message":{"usage":{"totalTokens":9999,"input":9999}}}\n')
+
+        def poll(self):
+            return 0                       # already reaped — watchdog must not trip
+
+        def communicate(self, input=None, timeout=None):
+            import time
+            time.sleep(0.1)                # let the watchdog poll while "running"
+            return ("a real review", "")
+
+        def kill(self):
+            raise AssertionError("must not kill a process that already exited")
+
+    run.subprocess.Popen = FinishedPopen
+    _capture_annotations()
+    try:
+        res = run.run_pass("/wt", "m", "sys", "usr")
+        assert res.status == "ok", res
+        assert res.text == "a real review", res
+    finally:
+        run.subprocess.Popen, run.BUDGET_POLL_S = real_popen, real_poll
         for k, v in saved.items():
             setattr(run, k, v)
         os.environ.pop("PI_SESSION_DIR", None)
