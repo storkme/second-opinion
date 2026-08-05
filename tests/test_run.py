@@ -396,6 +396,227 @@ def _restore_review_pr_deps(originals):
     run._gh, run._git, run.rv.shuffle_inputs = originals
 
 
+def _multifile_diff(n_files, chunk_chars):
+    """A diff of n_files, each ~chunk_chars, in git's path order."""
+    parts = []
+    for i in range(n_files):
+        path = f"src/f{i:02d}.rs"
+        body = "\n".join(["+x" * 20] * (chunk_chars // 41 + 1))
+        parts.append(f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+                     f"@@ -1 +1 @@\n{body}\n")
+    return "".join(parts)
+
+
+def _drive_review_pr_body(pr, diff, max_chars, make_worktree=True):
+    """Like _drive_review_pr but returns the posted comment body (via the dry-run print)."""
+    import contextlib
+    import io
+    import shutil
+    real = (run.K, run.run_pass, run.merge_reviews, run.MAX_DIFF_CHARS, run.PROVIDER)
+    run.K, run.PROVIDER, run.MAX_DIFF_CHARS = 1, "openrouter", max_chars
+    real_deps = _stub_review_pr_deps()
+    run._gh = lambda args, timeout_s=60: diff
+    wt = os.path.join(tempfile.gettempdir(), f"second-opinion-pr{pr}")
+    shutil.rmtree(wt, ignore_errors=True)
+    if make_worktree:
+        os.makedirs(wt, exist_ok=True)
+    run.run_pass = lambda w, m, s, u, session_dir=None: run.PassResult("finding", "ok")
+    _capture_annotations()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            run.review_pr(pr, "t", "cafebabe00", "m", "m", dry_run=True)
+        return buf.getvalue(), wt
+    finally:
+        run.K, run.run_pass, run.merge_reviews, run.MAX_DIFF_CHARS, run.PROVIDER = real
+        _restore_review_pr_deps(real_deps)
+        run._annotate = _REAL_ANNOTATE
+        shutil.rmtree(wt, ignore_errors=True)
+
+
+def test_footer_does_not_claim_an_on_disk_diff_that_was_never_written():
+    # The failure this whole change exists to kill is "partial coverage reads as full".
+    # A failed write must not leave the footer advertising coverage the agent never had.
+    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    body, _ = _drive_review_pr_body(4245, diff, max_chars=2500, make_worktree=False)
+    assert "could not be supplied" in body, body[-600:]
+    assert "supplied to the agent on disk" not in body, body[-600:]
+    assert "covers that excerpt" in body
+
+    # ...and when the write succeeds the footer says so, with the real numbers.
+    body, _ = _drive_review_pr_body(4246, diff, max_chars=2500, make_worktree=True)
+    assert "supplied to the agent on disk" in body, body[-600:]
+    assert "could not be supplied" not in body
+    assert "1 of 6 changed files" in body, body[-600:]
+
+
+def test_truncation_emits_exactly_one_coverage_annotation():
+    # Two warnings that contradict each other is worse than one that is accurate: the
+    # optimistic one is the one a reader believes.
+    import shutil
+    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    for make_wt in (True, False):
+        _, ann, wt = _drive_review_pr(4247 if make_wt else 4248, diff, 2500,
+                                      make_worktree=make_wt)
+        try:
+            cov = [m for lvl, m in ann if lvl == "warning" and "changed files" in m]
+            assert len(cov) == 1, cov
+            if make_wt:
+                assert "supplied on disk" in cov[0]
+            else:
+                assert "could NOT be written" in cov[0] and "excerpt ONLY" in cov[0]
+        finally:
+            shutil.rmtree(wt, ignore_errors=True)
+
+
+def _drive_review_pr(pr, diff, max_chars, make_worktree=True):
+    """Run review_pr against a stubbed world; return (prompt, annotations, worktree)."""
+    import shutil
+    real = (run.K, run.run_pass, run.merge_reviews, run.MAX_DIFF_CHARS, run.PROVIDER)
+    run.K, run.PROVIDER, run.MAX_DIFF_CHARS = 1, "openrouter", max_chars
+    real_deps = _stub_review_pr_deps()
+    run._gh = lambda args, timeout_s=60: diff
+    wt = os.path.join(tempfile.gettempdir(), f"second-opinion-pr{pr}")
+    shutil.rmtree(wt, ignore_errors=True)
+    if make_worktree:
+        os.makedirs(wt, exist_ok=True)
+    seen = {}
+    run.run_pass = lambda w, m, s, u, session_dir=None: (
+        seen.__setitem__("prompt", u), run.PassResult("finding", "ok"))[1]
+    ann = _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(pr, "t", "cafebabe00", "m", "m", dry_run=True)
+        return seen.get("prompt", ""), list(ann), wt
+    finally:
+        run.K, run.run_pass, run.merge_reviews, run.MAX_DIFF_CHARS, run.PROVIDER = real
+        _restore_review_pr_deps(real_deps)
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_truncated_diff_writes_the_full_diff_and_points_the_agent_at_it():
+    # filter_diff stops at the first chunk that overflows, so a big early file starves
+    # every file behind it (spaghettio#575: 1 of 16 files, 1.7%, green check). The excerpt
+    # may be capped, but the remainder must stay reachable.
+    import shutil
+    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    prompt, ann, wt = _drive_review_pr(4242, diff, max_chars=2500)
+    try:
+        path = os.path.join(wt, run.FULL_DIFF_NAME)
+        assert os.path.exists(path), "full diff was not written into the worktree"
+        full = open(path, encoding="utf-8").read()
+        # Everything the excerpt dropped is present in the on-disk copy.
+        for i in range(6):
+            assert f"src/f{i:02d}.rs" in full, i
+        assert len(full) > len(prompt), "on-disk diff should exceed the truncated excerpt"
+        # The agent is told it is truncated, where the rest is, and what is missing.
+        assert "TRUNCATED" in prompt
+        assert run.FULL_DIFF_NAME in prompt
+        assert "src/f05.rs" in prompt, "dropped files must be named in the prompt"
+        # ...and the operator sees it in the checks UI, with numbers, not just a vibe.
+        warn = [m for lvl, m in ann if lvl == "warning" and "changed files" in m]
+        assert warn, ann
+        assert "of 6 changed files" in warn[0], warn[0]
+    finally:
+        shutil.rmtree(wt, ignore_errors=True)
+
+
+def test_full_diff_puts_the_unseen_files_first_within_one_read():
+    # pi's read returns at most 2000 lines / 50KB, and this file is bigger than that by
+    # construction. In git path order the first read would return the SAME files the
+    # excerpt already carried, so the agent could "read the complete diff" and see
+    # nothing new. The files it is missing must lead.
+    import shutil
+    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    prompt, _ann, wt = _drive_review_pr(4249, diff, max_chars=2500)
+    try:
+        full = open(os.path.join(wt, run.FULL_DIFF_NAME), encoding="utf-8").read()
+        order = [ln.split(" b/")[-1] for ln in full.splitlines()
+                 if ln.startswith("diff --git ")]
+        # f00 is the only file the excerpt carried, so it must NOT lead the file.
+        assert order[0] != "src/f00.rs", order
+        assert order[-1] == "src/f00.rs", order
+        assert set(order) == {f"src/f{i:02d}.rs" for i in range(6)}, order
+        # The header says so too, and warns one read is not the whole file.
+        assert "ordered FIRST" in full, full[:400]
+        assert "larger than a single" in full, full[:400]
+        # ...and the prompt does not imply a single read suffices.
+        assert "LARGER than a single read returns" in prompt
+        assert "One read of that file is NOT the whole diff" in prompt
+    finally:
+        shutil.rmtree(wt, ignore_errors=True)
+
+
+def test_single_file_clipped_mid_hunk_is_not_described_as_full_coverage():
+    # filter_diff's single-chunk branch: one file overflows the cap on its own, so it
+    # lands in `files` and nothing is "dropped". Saying "1 of 1 changed files" there reads
+    # as FULL coverage while the file is cut mid-hunk — this PR's own headline bug in the
+    # one shape it hadn't covered.
+    import shutil
+    diff = _multifile_diff(n_files=1, chunk_chars=6000)
+    prompt, ann, wt = _drive_review_pr(4250, diff, max_chars=2500)
+    try:
+        assert "1 of 1 changed files" not in prompt, prompt[-400:]
+        assert "CUT OFF mid-file" in prompt, prompt[-400:]
+        # No dropped files, so no empty "absent from the excerpt" list.
+        assert "absent from the excerpt" not in prompt, prompt[-400:]
+        cov = [m for lvl, m in ann if lvl == "warning" and "excerpt" in m]
+        assert cov and "cuts the last one off mid-file" in cov[0], cov
+        assert "Not in the excerpt:" not in cov[0], cov[0]
+        # The file's own header must agree with all of the above. With nothing dropped
+        # the reorder is a no-op, so the TOP repeats the excerpt and the missing material
+        # is the TAIL — pointing the agent at the top would be actively wrong.
+        head = open(os.path.join(wt, run.FULL_DIFF_NAME), encoding="utf-8").read()[:700]
+        assert "the material you are missing is the TAIL" in head, head
+        assert "Page DOWN" in head, head
+        assert "ordered FIRST" not in head, head
+        assert "1 of 1 changed files" not in head, head
+    finally:
+        shutil.rmtree(wt, ignore_errors=True)
+
+    body, wt2 = _drive_review_pr_body(4251, diff, max_chars=2500)
+    try:
+        assert "covered 1 of 1 changed files" not in body, body[-500:]
+        assert "cut off mid-file" in body, body[-500:]
+    finally:
+        shutil.rmtree(wt2, ignore_errors=True)
+
+
+def test_untruncated_diff_adds_no_file_and_no_truncation_note():
+    import shutil
+    diff = _multifile_diff(n_files=2, chunk_chars=200)
+    prompt, ann, wt = _drive_review_pr(4243, diff, max_chars=1_000_000)
+    try:
+        assert not os.path.exists(os.path.join(wt, run.FULL_DIFF_NAME))
+        assert "TRUNCATED" not in prompt and run.FULL_DIFF_NAME not in prompt
+        assert not [m for _l, m in ann if "changed files" in m], ann
+    finally:
+        shutil.rmtree(wt, ignore_errors=True)
+
+
+def test_failed_write_still_tells_the_agent_the_diff_is_truncated():
+    # Disclosure and pointer are separate concerns. A failed write means the agent cannot
+    # READ the rest — it does not mean the agent should be left believing the excerpt is
+    # the whole change. Gating both on the pointer put the original bug back one branch
+    # over, and the previous version of this test asserted that bug as correct.
+    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    prompt, ann, wt = _drive_review_pr(4244, diff, max_chars=2500, make_worktree=False)
+    assert not os.path.exists(os.path.join(wt, run.FULL_DIFF_NAME))
+    # The pointer is withdrawn — never send the agent to a file that isn't there...
+    assert run.FULL_DIFF_NAME not in prompt, "prompt points at an unwritten file"
+    # ...but the truncation itself is still disclosed, with the missing files named.
+    assert "TRUNCATED" in prompt, "agent was handed a partial diff with no disclosure"
+    assert "1 of 6 changed files" in prompt
+    assert "src/f05.rs" in prompt
+    # It is told to read the checkout, and explicitly NOT to diff (shallow, no base ref).
+    assert "checked out at the PR's head commit" in prompt
+    assert "cannot diff them against the base" in prompt
+    assert [m for lvl, m in ann
+            if lvl == "warning" and "could NOT be written" in m and "excerpt ONLY" in m], ann
+
+
 def test_review_pr_parallel_passes_run_concurrently_and_keep_order():
     # All K passes must be in flight AT ONCE — the barrier times out loudly if any pass
     # waits on another (i.e. the loop silently went sequential, losing the wall-clock win

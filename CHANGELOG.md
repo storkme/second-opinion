@@ -23,6 +23,40 @@ All notable changes to this project are documented here. The format follows
   the README table, and enforced in this repo's own dogfood workflow (40min job / 1800s pass =
   600s slack).
 
+### Fixed
+- **A truncated diff no longer silently reads as full coverage.** `max-diff-chars` caps the
+  prompt excerpt, and the filter stops at the first file chunk that overflows — so with
+  chunks in git's path order, one large early file starves every file behind it. Measured on
+  spaghettio#575: the excerpt carried **1 of 16 changed files (1.7% of the diff)** — a single
+  generated HTML artifact — while all 12 Rust source files went unseen, and the check went
+  green behind a one-line footnote. Three changes:
+  - The **complete** (still glob-filtered) diff is written into the agent's working
+    directory as `.second-opinion-full-diff.patch`, and the prompt names it, states the
+    excerpt is truncated, lists the files missing from it, and tells the agent to read the
+    rest and prioritise source over generated artifacts. The whole diff was already in hand
+    — only the prompt was capped — so nothing new is fetched. It lands inside the checkout
+    on purpose: an absolute path outside it would be unreadable under `TOOLS=read`, and a
+    full diff the agent cannot open is a quieter version of the same bug. `git worktree
+    remove --force` cleans it up.
+  - Truncation now emits a `::warning` naming the covered/total file counts and the dropped
+    files, instead of being visible only as italics at the foot of the posted comment.
+  - The comment footer states the real numbers (`covered N of M changed files`) rather than
+    "coverage is partial", which reads identically at 1-of-16 and 15-of-16.
+
+  - The on-disk copy is ordered **unseen files first, smallest first**, and both the
+    prompt and a header inside the file say that one read is not the whole thing.
+    An agent read tool truncates (pi: 2000 lines / 50KB, whichever first) and this
+    file exceeds that by construction, so in git path order the first read returned
+    the same files the excerpt already carried — the agent could "read the complete
+    diff" and see nothing new. On spaghettio#575 one read reached 1 file; it now
+    reaches 10, all source, because the giant generated artifacts sort last.
+
+  Coverage of the remainder is now *reachable* rather than *guaranteed* — it depends on the
+  agent actually reading the file — and the annotation and footer both say so. If the write
+  itself fails, the agent is still told the excerpt is truncated and which files are missing
+  (it just gets no pointer, and is told to read the checkout rather than to `git diff`, which
+  a shallow checkout with no base ref cannot do).
+
 ## [1.4.0] - 2026-08-05
 
 ### Changed

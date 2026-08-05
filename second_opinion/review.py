@@ -143,6 +143,11 @@ def _excluded(path: str, globs: list[str]) -> bool:
     return any(_glob_to_re(g).match(path) for g in globs)
 
 
+# Appended to a truncated diff. Exported so callers measuring coverage can subtract it
+# instead of comparing an excerpt that carries it against a full diff that doesn't.
+TRUNCATION_TRAILER = "\n\n[... diff truncated for length ...]\n"
+
+
 def filter_diff(diff: str, exclude_globs: list[str], max_chars: int) -> tuple[str, list[str], bool]:
     """Drop excluded/generated files and cap total size at whole-file boundaries.
     Returns (diff, files, truncated)."""
@@ -170,8 +175,31 @@ def filter_diff(diff: str, exclude_globs: list[str], max_chars: int) -> tuple[st
             break
     joined = "".join(out)
     if truncated:
-        joined += "\n\n[... diff truncated for length ...]\n"
+        joined += TRUNCATION_TRAILER
     return joined, files, truncated
+
+
+def reorder_unseen_first(diff: str, unseen: list[str]) -> str:
+    """Reorder per-file chunks so the `unseen` paths come first.
+
+    The on-disk full diff is consumed by an agent whose read tool truncates (pi: 2000
+    lines or 50KB, whichever hits first) — and that file is larger than the cap by
+    construction, since it only exists when the prompt excerpt overflowed. Left in git
+    path order, the agent's first read would return the very files the excerpt already
+    carried, so it could read "the complete diff" and see nothing new. Putting the
+    missing files first means one read lands on material the excerpt lacked.
+
+    The unseen chunks are further ordered SMALLEST FIRST, because the read cap is a
+    budget and one huge file spends all of it. Unseen-first alone is not enough: if the
+    first unseen chunk is a large generated file it consumes the whole read and the agent
+    still sees one file. Smallest-first spends that same budget on many, which is the
+    difference between "reachable" and "reachable in practice". The agent is told to page
+    for the rest either way."""
+    want = set(unseen)
+    chunks = _split_by_file(diff)
+    first = sorted((c for c in chunks if _file_of_chunk(c) in want), key=len)
+    rest = [c for c in chunks if _file_of_chunk(c) not in want]
+    return "".join(first + rest)
 
 
 def shuffle_inputs(filtered: str, seed: int) -> str:

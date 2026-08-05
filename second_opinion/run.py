@@ -100,6 +100,12 @@ FAIL_MARKER = "<!-- second-opinion-failed sha={sha} -->"
 # review at all. The merge-fallback path is the worst case, since it concatenates the K raw
 # passes with no dedup and is therefore strictly larger than the merged body would be.
 COMMENT_MAX = 65536
+# Filename for the untruncated diff dropped into the worktree when the prompt excerpt is
+# capped. Deliberately inside the checkout: pi's `read` tool is reliable there, whereas an
+# absolute path outside it depends on the tool grant (TOOLS=read alone could not reach it),
+# and a full diff the agent cannot open is just a quieter version of the bug this fixes.
+# `git worktree remove --force` deletes it with the worktree, so there is nothing to clean up.
+FULL_DIFF_NAME = ".second-opinion-full-diff.patch"
 
 MERGE_PROMPT = """\
 You are merging K independent reviews of the SAME pull-request diff into one comment.
@@ -839,21 +845,90 @@ def _post_failure_notice(pr: int, sha: str, dry_run: bool, checkout: bool = Fals
 
 def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_run: bool) -> ReviewOutcome:
     diff = _gh(["pr", "diff", str(pr)])
-    filtered, _files, truncated = rv.filter_diff(diff, _exclude_globs(), MAX_DIFF_CHARS)
+    globs = _exclude_globs()
+    filtered, files, truncated = rv.filter_diff(diff, globs, MAX_DIFF_CHARS)
     if not filtered.strip():
         log(f"#{pr}: empty filtered diff — skipping")
         return ReviewOutcome(False, False)
 
+    # When the excerpt is capped the rest of the change has to stay REACHABLE. filter_diff
+    # stops at the first chunk that overflows, and chunks arrive in git's path order, so a
+    # big generated artifact early in the alphabet can starve every source file behind it —
+    # observed on spaghettio#575, where the excerpt carried 1 of 16 files (1.7% of the diff)
+    # and the check still went green. The whole diff is already in hand here; only the
+    # prompt is capped. Write the untruncated (still glob-filtered) diff into the worktree
+    # and name it in the prompt, so what the excerpt drops is one `read` away instead of
+    # invisible.
+    dropped: list[str] = []
+    full_text = ""
+    if truncated:
+        full_text, all_files, _ = rv.filter_diff(diff, globs, len(diff) + 1)
+        seen = set(files)
+        dropped = [p for p in all_files if p not in seen]
+
     system = rv.system_prompt(PROJECT, _guidance())
+    _git(["fetch", "-q", "origin", f"refs/pull/{pr}/head"], check=False)
+    wt = os.path.join(tempfile.gettempdir(), f"second-opinion-pr{pr}")
+    full_diff_rel = FULL_DIFF_NAME if truncated else ""
 
     def user_turn(diff_text: str) -> str:
-        return (f"PR #{pr}: {title}\n\nThe full repository is checked out in your working "
+        turn = (f"PR #{pr}: {title}\n\nThe full repository is checked out in your working "
                 f"directory at the PR's head commit. Use your tools (read, grep via bash) "
                 f"to inspect callers, tests, and definitions as needed. The change to "
                 f"review is this diff:\n\n{diff_text}\n")
+        # Disclosure and pointer are SEPARATE concerns. Whether the on-disk copy exists
+        # changes what the agent can do about truncation; it never changes whether the
+        # agent needs to know it happened. Gating both on the pointer left the failure
+        # path handing over a 1-of-16-file excerpt with no hint it was partial — the very
+        # bug this whole change exists to kill, reintroduced one branch over.
+        if not truncated:
+            return turn
+        shown = len(files)
+        listed = "".join(f"  - {p}\n" for p in dropped[:60])
+        if len(dropped) > 60:
+            listed += f"  - ... and {len(dropped) - 60} more\n"
+        if dropped:
+            turn += (f"\nIMPORTANT — the diff above is TRUNCATED: it carries only {shown} of "
+                     f"{shown + len(dropped)} changed files. ")
+        else:
+            # filter_diff's single-chunk clip branch: one file overflowed the cap on its
+            # own, so it is in `files` and nothing is "dropped". Saying "1 of 1 changed
+            # files" here would read as FULL coverage while the file is cut mid-hunk —
+            # this PR's own headline bug, in the one shape it had not covered.
+            turn += ("\nIMPORTANT — the diff above is TRUNCATED. Every changed file is "
+                     "represented, but the last one is CUT OFF mid-file — you are missing "
+                     "the tail of its diff, not a separate file. ")
+        if full_diff_rel:
+            turn += (f"The COMPLETE diff is in your working directory at "
+                     f"`./{full_diff_rel}` (it is not part of the PR — it was placed there "
+                     f"for you). It is LARGER than a single read returns")
+            if dropped:
+                turn += (f", so the {len(dropped)} files missing from the excerpt are "
+                         f"ordered FIRST in it: read from the top and you get what the "
+                         f"excerpt lacked, then page onwards")
+            else:
+                turn += ", so page through it to reach the part that was cut off"
+            if "bash" in TOOLS:
+                turn += f" (or `grep -n '^diff --git' {full_diff_rel}` to jump to a file)"
+            turn += (". One read of that file is NOT the whole diff — do not treat it as "
+                     "such. ")
+        else:
+            # No on-disk copy. The checkout is still there, so the agent can read the
+            # current state of the named files — but NOT diff them: the consumer's
+            # checkout is shallow and the base ref is never fetched, so telling it to run
+            # `git diff` would just produce a confident failure.
+            turn += ("The complete diff could NOT be provided this run. The repository is "
+                     "checked out at the PR's head commit, so read the files named below "
+                     "to see their current state — but you cannot diff them against the "
+                     "base (the checkout is shallow and the base ref is absent), so report "
+                     "that your view of those files is partial rather than implying you "
+                     "reviewed the change to them. ")
+        turn += ("Treat the excerpt above as a starting point, not the change. Prioritise "
+                 "source files over generated artifacts.")
+        if dropped:
+            turn += f" Files changed by this PR but absent from the excerpt:\n{listed}"
+        return turn
 
-    _git(["fetch", "-q", "origin", f"refs/pull/{pr}/head"], check=False)
-    wt = os.path.join(tempfile.gettempdir(), f"second-opinion-pr{pr}")
     _git(["worktree", "remove", "--force", wt], check=False)
     add = _git(["worktree", "add", "--detach", "--force", wt, sha], check=False)
     if add.returncode != 0:
@@ -870,6 +945,78 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     total_cost = 0.0
     total_tokens = 0
     try:
+        # Inside the try: log()/_annotate() print, and a BrokenPipeError here
+        # would otherwise escape review_pr with the worktree still on disk.
+        if truncated:
+            # Write FIRST, then report — so there is exactly one annotation and it describes
+            # what actually happened. Announcing "full diff supplied on disk" and then failing
+            # to write it would be two contradictory warnings, and the optimistic one is the
+            # one a reader believes.
+            write_err = ""
+            # Dropped files FIRST. pi's read tool returns at most 2000 lines or 50KB,
+            # whichever hits first, and this file is larger than that by construction —
+            # it only exists because the excerpt overflowed. Left in git path order the
+            # agent's first read would hand back the very files the excerpt already
+            # carried, so it could "read the complete diff" and see nothing new: the
+            # original bug, one layer down.
+            ordered = rv.reorder_unseen_first(full_text, dropped)
+            # Branch the header exactly as the prompt/annotation/footer do. With `dropped`
+            # empty, reorder_unseen_first is a no-op, so the top of this file is the same
+            # clipped head the excerpt already carried and the missing material is the
+            # TAIL. Telling the agent to read the top would be worse than saying nothing:
+            # it would see familiar content, believe it had caught up, and never page down.
+            head = (f"# Full diff for PR #{pr} — placed here by second-opinion; NOT part of\n"
+                    f"# the PR. This file is larger than a single read returns.\n")
+            if dropped:
+                header = (head +
+                          f"# The prompt excerpt carried {len(files)} of "
+                          f"{len(files) + len(dropped)} changed files. The {len(dropped)} it\n"
+                          f"# did NOT carry are ordered FIRST below (smallest first, so one\n"
+                          f"# read reaches as many as possible): reading from the TOP gives\n"
+                          f"# you material the excerpt lacked, then page onwards.\n\n")
+            else:
+                header = (head +
+                          f"# The excerpt carried every changed file, but cut the last one\n"
+                          f"# off mid-file. Order here is unchanged, so the TOP repeats what\n"
+                          f"# you already saw — the material you are missing is the TAIL.\n"
+                          f"# Page DOWN to the end to reach it.\n\n")
+            try:
+                with open(os.path.join(wt, FULL_DIFF_NAME), "w", encoding="utf-8") as fh:
+                    fh.write(header + ordered)
+            except OSError as e:
+                # Non-fatal: the excerpt still yields a review. But the agent now has no way to
+                # reach the remainder, so clear the pointer (or the prompt sends it to read a
+                # file that isn't there) and make every downstream claim reflect that.
+                full_diff_rel = ""
+                write_err = " ".join(str(e).split())[:120]
+            # Loud, and specific about what was dropped. A count buried in the comment footer
+            # reads the same at 1-of-16 as at 15-of-16; the annotation names the files so
+            # partial coverage cannot be mistaken for full coverage in the checks UI.
+            # Subtract the trailer filter_diff appends to a truncated excerpt: full_text has
+            # none, so counting it would compare an excerpt against a differently-shaped whole.
+            excerpt_chars = len(filtered)
+            if filtered.endswith(rv.TRUNCATION_TRAILER):
+                excerpt_chars -= len(rv.TRUNCATION_TRAILER)
+            pct = 100 * excerpt_chars // max(1, len(full_text))
+            listed = ", ".join(dropped[:10]) + (f", +{len(dropped) - 10} more"
+                                                if len(dropped) > 10 else "")
+            tail = (f"full diff supplied on disk, but coverage of the remainder depends on the "
+                    f"agent reading it" if full_diff_rel else
+                    f"and the full diff could NOT be written ({write_err}) — this review covers "
+                    f"the excerpt ONLY")
+            log(f"#{pr}: diff truncated — excerpt has {len(files)}/{len(files) + len(dropped)} "
+                f"files ({pct}% of the filtered diff); "
+                f"{'full diff written to ' + FULL_DIFF_NAME if full_diff_rel else 'WRITE FAILED: ' + write_err}")
+            # With nothing dropped, "N of N changed files" would read as full coverage
+            # while the last file is cut mid-hunk — describe the clip instead.
+            scope = (f"covers {len(files)} of {len(files) + len(dropped)} changed files"
+                     if dropped else
+                     f"holds all {len(files)} changed file(s) but cuts the last one off "
+                     f"mid-file")
+            missing = f". Not in the excerpt: {listed}" if dropped else ""
+            _annotate("warning",
+                      f"#{pr}: prompt excerpt {scope} ({pct}% of the filtered diff by size) "
+                      f"— {tail}{missing}")
         msgs = [user_turn(filtered if i == 0 else rv.shuffle_inputs(filtered, i))
                 for i in range(K)]
         elapsed: dict = {}
@@ -939,7 +1086,22 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     # models), so label the total as an estimate regardless of whether a pass degraded.
     footer = _cost_footer(total_cost, total_tokens, estimated=True)
     if truncated:
-        footer += "\n\n*(diff truncated to fit context — coverage is partial)*"
+        # Name the numbers. "coverage is partial" reads identically at 1-of-16 and 15-of-16,
+        # and the reader has no way to tell which they got. Gate the on-disk claim on
+        # `full_diff_rel` — the honest signal — or a failed write would have the footer
+        # advertising coverage the agent never had, which is this PR's own bug relocated.
+        # `N of N changed files` would read as full coverage in the single-chunk clip
+        # case, where nothing is dropped but the one file is cut mid-hunk.
+        seen_of = (f"covered {len(files)} of {len(files) + len(dropped)} changed files"
+                   if dropped else
+                   f"held all {len(files)} changed file(s) but was cut off mid-file")
+        if full_diff_rel:
+            footer += (f"\n\n*(prompt excerpt {seen_of}; the full diff was supplied to the "
+                       f"agent on disk. Coverage of the remainder depends on it having "
+                       f"read that.)*")
+        else:
+            footer += (f"\n\n*(prompt excerpt {seen_of}, and the full diff could not be "
+                       f"supplied — this review covers that excerpt **only**.)*")
     marker = MARKER.format(sha=sha)
     shell = HEADER.format(marker=marker, pass_label=pass_label, model=model, body="")
     # Reserve in bytes, matching _clip_review_body's budget — the shell is not ASCII.
