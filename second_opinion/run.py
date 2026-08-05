@@ -717,10 +717,15 @@ def _clip_review_body(review_body: str, reserved: int, limit: int = COMMENT_MAX)
     notice = "\n\n*(review truncated to fit GitHub's comment size limit — see the run log)*"
     if room <= 0:
         # Pathological: header+footer alone fill the cap. Nothing useful to salvage.
-        return notice.strip()
+        return ""
     if len(review_body) <= room:
         return review_body
-    keep = max(0, room - len(notice))
+    keep = room - len(notice)
+    if keep <= 0:
+        # `room` too small for even the notice. Unreachable from review_pr (the header and
+        # footer are hundreds of chars against a 65536 cap), but the helper takes a general
+        # `limit`, so keep it correct in isolation: never return more than `room`.
+        return notice.strip()[:room]
     log(f"review body {len(review_body)}c exceeds the comment cap — clipping to {keep}c")
     _annotate("warning",
               f"review body clipped to fit GitHub's {limit}-char comment limit "

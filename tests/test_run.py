@@ -201,6 +201,12 @@ def test_clip_review_body_preserves_short_bodies_and_marker_position():
     clipped = run._clip_review_body("y" * 5000, reserved=0, limit=1000)
     assert len(clipped) <= 1000
     assert clipped.startswith("yyy") and "truncated" in clipped
+    # The result must never exceed the room it was given, at any limit — including the
+    # window where there isn't even room for the truncation notice, and the degenerate
+    # case where the header/footer alone fill the cap.
+    for limit in range(0, 400, 7):
+        out = run._clip_review_body("z" * 5000, reserved=0, limit=limit)
+        assert len(out) <= max(0, limit), (limit, len(out))
 
 
 def test_merge_reviews_accumulates_cost_across_a_retried_attempt():
