@@ -223,6 +223,80 @@ def test_review_pr_worktree_add_failure_is_degraded_and_annotates():
     assert ann[0][0] == "error" and "worktree add failed" in ann[0][1]
 
 
+def _stub_review_pr_deps():
+    """Common stubs for driving review_pr past the diff fetch and worktree add."""
+    run._gh = lambda args, timeout_s=60: (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n")
+    run._git = lambda args, check=True: FakeProc(0)
+    run.rv.shuffle_inputs = lambda d, i: f"<<{i}>>"
+
+
+def test_review_pr_parallel_passes_run_concurrently_and_keep_order():
+    # All K passes must be in flight AT ONCE — the barrier times out loudly if any pass
+    # waits on another (i.e. the loop silently went sequential, losing the wall-clock win
+    # this path exists for). Results keep index order, empties drop, and a degraded sibling
+    # of a posted union still reports degraded=True per the exit contract.
+    import threading
+    barrier = threading.Barrier(3, timeout=10)
+    real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    run.K = 3
+    _stub_review_pr_deps()
+    merged = {}
+
+    def fake_merge(pr, title, passes, merge_model=None, meta=None):
+        merged["passes"] = passes
+        return "MERGED"
+
+    run.merge_reviews = fake_merge
+
+    def fake_pass(wt, model, system, user, session_dir=None):
+        barrier.wait()  # BrokenBarrierError after 10s if the passes are serialized
+        tag = user.split("<<")[1].split(">>")[0] if "<<" in user else "0"
+        if tag == "1":
+            return run.PassResult("", "timeout")  # one degraded sibling
+        return run.PassResult(f"pass-{tag}", "ok")
+
+    run.run_pass = fake_pass
+    _capture_annotations()
+    try:
+        out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+        assert out == run.ReviewOutcome(posted=True, degraded=True)
+        assert merged["passes"] == ["pass-0", "pass-2"]  # index order kept, empty dropped
+    finally:
+        run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_pr_parallel_passes_get_distinct_session_dirs():
+    # Concurrent passes sharing one session dir would interleave transcripts and let each
+    # pass absorb its siblings' usage (the prior-files exclusion is a snapshot taken per
+    # pass), double-counting cost. Each pass must get its own subdir under PI_SESSION_DIR.
+    real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    run.K = 3
+    _stub_review_pr_deps()
+    run.merge_reviews = lambda pr, title, passes, merge_model=None, meta=None: "MERGED"
+    seen = []
+
+    def fake_pass(wt, model, system, user, session_dir=None):
+        seen.append(session_dir)
+        return run.PassResult("text", "ok")
+
+    run.run_pass = fake_pass
+    _capture_annotations()
+    with tempfile.TemporaryDirectory() as base:
+        os.environ["PI_SESSION_DIR"] = base
+        try:
+            run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+            assert len(seen) == 3 and all(d for d in seen), seen
+            assert len(set(seen)) == 3, f"passes shared a session dir: {seen}"
+            assert sorted(os.path.basename(d) for d in seen) == \
+                ["pass-1", "pass-2", "pass-3"], seen
+        finally:
+            os.environ.pop("PI_SESSION_DIR", None)
+            run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+            run._annotate = _REAL_ANNOTATE
+
+
 def test_already_reviewed_matches_marker_at_start_only():
     seen = {}
 
