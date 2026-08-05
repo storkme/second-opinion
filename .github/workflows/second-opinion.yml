@@ -78,8 +78,11 @@ jobs:
         # !cancelled() would happily upload it. That hole is closed in run.py, where a
         # finally re-runs the scrub on every exit path; this guard covers the one case
         # that never re-enters Python at all.
-        # It still captures everything worth having: a degraded pass exits 2, which is
-        # failure(), and that is exactly when the transcript is wanted.
+        # It must NOT be narrowed to failure(). A degraded pass does not imply a failed
+        # job: _should_fail is `degraded and not posted`, so a K>1 run where one pass
+        # degrades and a review still posts exits 0 (green). failure() would skip the
+        # upload and silently drop precisely the degraded transcript this step exists to
+        # keep. !cancelled() covers success and failure alike, which is the point.
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
