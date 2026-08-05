@@ -630,20 +630,54 @@ def _chat(base_url: str, api_key: str, model: str, prompt: str, meta: dict | Non
 
 
 def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | None = None, meta: dict | None = None) -> str:
-    """Union the K passes via one merge call (only used when K>1)."""
+    """Union the K passes via one merge call (only used when K>1). Never raises.
+
+    The passes ARE the review; the merge is editorial. Losing K good reviews because the
+    editorial step flaked is the wrong failure mode — under `fail-on-degraded` it reds the
+    check with nothing to show for it (observed live on spaghettio#561: 3/3 passes produced
+    reviews, 4240/4959/4275 chars, then the merge returned an empty-content 200 and the
+    whole run exited 2).
+
+    Disabling reasoning on the merge call removed the *known* cause of those empty 200s,
+    but it cannot make a hosted call infallible — it can still flake empty or raise. So:
+    retry once (the policy `eval.py`'s judge has had since #9, for the same reason), then
+    fall back to posting the raw passes unmerged. A merge-step outage now degrades
+    formatting, never delivery, and the `::warning` annotation keeps the malfunction
+    visible instead of trading a red check for a silent one."""
     merge_model = merge_model or MERGE_MODEL or MODEL
     passes_block = "\n\n".join(
         f"=== PASS {i+1} of {len(passes)} (independent) ===\n{p}"
         for i, p in enumerate(passes))
     prompt = MERGE_PROMPT.format(pr=pr, title=title, passes_block=passes_block)
-    if MERGE_PROVIDER == "local":
-        out = _chat(LLAMA_SERVER_URL, "", merge_model, prompt, meta)
-    else:
-        key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-        out = _chat(OPENROUTER_BASE, key, merge_model, prompt, meta)
-    if not out:
-        raise RuntimeError(f"merge ({MERGE_PROVIDER}/{merge_model}) returned no usable content")
-    return out
+    failure = "returned no usable content"
+    for attempt in (1, 2):
+        attempt_meta: dict = {}
+        try:
+            if MERGE_PROVIDER == "local":
+                out = _chat(LLAMA_SERVER_URL, "", merge_model, prompt, attempt_meta)
+            else:
+                key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+                out = _chat(OPENROUTER_BASE, key, merge_model, prompt, attempt_meta)
+        except Exception as e:  # noqa: BLE001 — transient HTTP failures retry like empties
+            out = ""
+            failure = f"raised {type(e).__name__}: {str(e)[:120]}"
+        else:
+            failure = "returned no usable content"
+        # A flaked attempt still bills for the tokens it burned (a reasoning-burn empty is
+        # the *expensive* failure), so accumulate rather than overwrite: reporting only the
+        # winning attempt would understate real spend on exactly the runs that cost most.
+        if meta is not None:
+            for field, value in attempt_meta.items():
+                meta[field] = meta.get(field, 0) + value
+        if out:
+            return out
+        log(f"merge ({MERGE_PROVIDER}/{merge_model}) attempt {attempt}/2 {failure}")
+    _annotate("warning",
+              f"union merge failed twice ({failure}) — posting {len(passes)} raw passes unmerged")
+    parts = [f"*(union merge unavailable — the {len(passes)} independent passes follow "
+             "unmerged; findings may repeat or disagree between passes)*"]
+    parts += [f"### Pass {i+1} of {len(passes)}\n\n{p}" for i, p in enumerate(passes)]
+    return "\n\n---\n\n".join(parts)
 
 
 def _cost_footer(total_cost: float, tokens: int, estimated: bool) -> str:

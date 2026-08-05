@@ -39,22 +39,75 @@ def test_merge_reviews_parses_and_strips_content():
     assert run.merge_reviews(1, "t", ["pass a", "pass b"]) == "merged"
 
 
-def test_merge_reviews_raises_clean_on_malformed_200():
-    # empty choices / error envelope / moderation-shaped — must be a clean RuntimeError,
-    # not a raw KeyError/IndexError leaking to the caller.
-    for payload in (
-        {"choices": []},
-        {"error": {"message": "bad"}},
-        {},
-        {"choices": [{}]},
-    ):
+def test_merge_reviews_retries_once_on_empty_then_succeeds():
+    # A single flake must not cost the run its review: attempt 1 empty, attempt 2 good.
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return _Resp({"choices": []})
+        return _Resp({"choices": [{"message": {"content": "merged"}}]})
+
+    run.requests.post = post
+    ann = _capture_annotations()
+    try:
+        assert run.merge_reviews(1, "t", ["a", "b"]) == "merged"
+        assert len(calls) == 2, "expected exactly one retry"
+        assert ann == [], "a recovered merge must not annotate"
+    finally:
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_merge_reviews_falls_back_to_raw_passes_after_two_failures():
+    # Every malformed-but-200 envelope, plus a raising transport. merge_reviews must never
+    # raise — the passes are the review, so they get posted unmerged with a loud warning.
+    for payload in ({"choices": []}, {"error": {"message": "bad"}}, {}, {"choices": [{}]}):
         run.requests.post = lambda *a, p=payload, **k: _Resp(p)
+        ann = _capture_annotations()
         try:
-            run.merge_reviews(1, "t", ["a"])
-        except RuntimeError as e:
-            assert "no usable content" in str(e)
-        else:
-            raise AssertionError(f"expected RuntimeError for payload {payload}")
+            out = run.merge_reviews(1, "t", ["finding a", "finding b"])
+            assert "finding a" in out and "finding b" in out, payload
+            assert "union merge unavailable" in out, payload
+            assert [lvl for lvl, _ in ann] == ["warning"], payload
+        finally:
+            run._annotate = _REAL_ANNOTATE
+
+    def boom(*a, **k):
+        raise RuntimeError("connection reset")
+
+    run.requests.post = boom
+    ann = _capture_annotations()
+    try:
+        out = run.merge_reviews(1, "t", ["finding a", "finding b"])
+        assert "finding a" in out and "finding b" in out
+        assert [lvl for lvl, _ in ann] == ["warning"]
+        assert "raised RuntimeError" in ann[0][1]
+    finally:
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_merge_reviews_accumulates_cost_across_a_retried_attempt():
+    # The expensive failure mode is a reasoning-burn empty: it bills full freight and
+    # returns nothing. Reporting only the winning attempt would understate spend on
+    # exactly the runs that cost the most, so meta must accumulate across attempts.
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        usage = {"cost": 0.02, "total_tokens": 1000,
+                 "completion_tokens_details": {"reasoning_tokens": 900}}
+        if len(calls) == 1:
+            return _Resp({"choices": [{"message": {"content": ""}}], "usage": usage})
+        return _Resp({"choices": [{"message": {"content": "merged"}}], "usage": usage})
+
+    run.requests.post = post
+    meta: dict = {}
+    assert run.merge_reviews(1, "t", ["a", "b"], meta=meta) == "merged"
+    assert len(calls) == 2
+    assert meta["cost"] == 0.04, meta          # both attempts, not just the winner
+    assert meta["tokens"] == 2000, meta
+    assert meta["reasoning_tokens"] == 1800, meta
 
 
 def _capture_annotations():

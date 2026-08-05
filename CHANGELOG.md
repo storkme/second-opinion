@@ -5,6 +5,18 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Fixed
+- A flaked union merge no longer throws away the review it was given. When `K>1`, the merge
+  call is retried once, and if it fails twice the raw passes are posted unmerged behind a
+  header note and a `::warning` annotation. The passes *are* the review and the merge is
+  only editorial, so a merge-step outage now degrades formatting instead of delivery —
+  previously a single empty-content 200 after K successful passes discarded all of them and
+  turned the required check red. `merge_reviews()` no longer raises. Cost/token accounting
+  sums every attempt, so a retried merge reports what it actually spent rather than only
+  the winning call.
+
 ## [1.3.0] - 2026-08-04
 
 ### Security
