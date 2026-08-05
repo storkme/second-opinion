@@ -47,7 +47,6 @@ All notable changes to this project are documented here. The format follows
   callers now share `truncation_notice()` / `write_full_diff()` / `coverage_phrase()`, so
   they cannot drift again.
 
-
 ## [1.5.0] - 2026-08-05
 
 ### Changed

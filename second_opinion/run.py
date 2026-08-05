@@ -171,6 +171,13 @@ def _annotate(level: str, msg: str) -> None:
     print(f"::{level} title=second-opinion::{msg}", flush=True)
 
 
+def _as_text(v) -> str:
+    """Decode a subprocess payload that may be bytes even when text=True was requested."""
+    if isinstance(v, bytes):
+        return v.decode("utf-8", "replace")
+    return v or ""
+
+
 def _peek(out: str | None, limit: int = 200) -> str:
     """Collapse whitespace and truncate a subprocess\'s partial output for a log/annotation, so a blocked pass carries a forensic tail instead of a silent black box."""
     return " ".join((out or "").split())[:limit]
@@ -678,7 +685,10 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
             try:
                 out, err = proc.communicate()
             except Exception:  # noqa: BLE001
-                out, err = (e.output or ""), (e.stderr or "")
+                # TimeoutExpired carries BYTES on POSIX even under text=True, and _peek
+                # does " ".join(x.split()) — bytes there is a TypeError that would crash
+                # the pass instead of returning a clean degraded "timeout".
+                out, err = _as_text(e.output), _as_text(e.stderr)
             # The exception carries the partial output captured before the kill (stdout in
             # `output`, stderr in `stderr`) — surface it so a blocked pass is diagnosable
             # from the log, not a silent black box.

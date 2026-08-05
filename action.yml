@@ -67,8 +67,10 @@ inputs:
     required: false
     default: ""
   max-pass-cost-usd:
-    description: "Same, in USD. Depends on a price lookup that can fail, so prefer
-      max-pass-tokens as the primary guard. Empty (default) disables it."
+    description: "Same, in USD. Prefer max-pass-tokens as the primary guard: this one
+      depends on a price lookup, and a persistently failing lookup is deliberately left
+      uncached (so a daemon retries), which means a cost-only ceiling degrades to a no-op
+      while stalling each poll on the fetch. Empty (default) disables it."
     required: false
     default: ""
   session-dir:

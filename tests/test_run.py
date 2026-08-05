@@ -549,16 +549,24 @@ def test_a_pass_that_finishes_over_the_ceiling_keeps_its_review():
             with open(os.path.join(sd, "s.jsonl"), "w") as fh:
                 fh.write('{"message":{"usage":{"totalTokens":9999,"input":9999}}}\n')
 
+        polls = {"n": 0}
+
         def poll(self):
-            return 0                       # already reaped — watchdog must not trip
+            # ALIVE on the first poll, so the watchdog genuinely sets breach["why"],
+            # then reaped. That is the real race: the flag is set, and the process
+            # finishes on its own before the kill lands. If poll() only ever returned 0
+            # the watchdog would never trip and the main thread's returncode guard —
+            # the thing that actually saves the review — would be dead-untested.
+            self.polls["n"] += 1
+            return None if self.polls["n"] == 1 else 0
 
         def communicate(self, input=None, timeout=None):
             import time
-            time.sleep(0.1)                # let the watchdog poll while "running"
+            time.sleep(0.12)               # let the watchdog poll while "running"
             return ("a real review", "")
 
         def kill(self):
-            raise AssertionError("must not kill a process that already exited")
+            pass                           # no-op, exactly as on a reaped process
 
     run.subprocess.Popen = FinishedPopen
     _capture_annotations()
@@ -640,6 +648,45 @@ def test_degraded_annotations_report_what_the_pass_spent():
         os.environ.pop("PI_SESSION_DIR", None)
         run._annotate = _REAL_ANNOTATE
         shutil.rmtree(session, ignore_errors=True)
+
+
+def test_timeout_fallback_survives_bytes_from_timeoutexpired():
+    # On POSIX, TimeoutExpired carries BYTES in .output/.stderr even under text=True.
+    # The fallback only runs when the post-kill communicate() itself raises, and _peek
+    # does " ".join(x.split()) — bytes there is a TypeError that would crash the pass
+    # instead of returning a clean degraded "timeout".
+    real_popen = run.subprocess.Popen
+
+    class BytesTimeout:
+        returncode = -9
+
+        def __init__(self, cmd, **k):
+            self._n = 0
+
+        def poll(self):
+            return None
+
+        def communicate(self, input=None, timeout=None):
+            self._n += 1
+            if self._n == 1:
+                raise run.subprocess.TimeoutExpired(
+                    cmd="pi", timeout=1, output=b"partial stdout\n",
+                    stderr=b"\xff\xfe non-utf8 tail\n")
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")  # forces the fallback
+
+        def kill(self):
+            pass
+
+    run.subprocess.Popen = BytesTimeout
+    ann = _capture_annotations()
+    try:
+        res = run.run_pass("/wt", "m", "sys", "usr")
+        assert res.status == "timeout", res          # degraded, not a crash
+        msg = " ".join(m for _l, m in ann)
+        assert "timed out" in msg and "partial output" in msg, msg
+    finally:
+        run.subprocess.Popen = real_popen
+        run._annotate = _REAL_ANNOTATE
 
 
 def test_should_fail_only_on_degraded_without_post():
