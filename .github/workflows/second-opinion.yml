@@ -79,3 +79,13 @@ jobs:
           # `warn`, not `ignore`: a silently empty upload is how the downstream copy of
           # this step did nothing for a day while reporting success.
           if-no-files-found: warn
+          # THIS REPO IS PUBLIC, so these artifacts are world-downloadable. The README's
+          # Security section says to prefer private/EXPIRING artifacts on public repos,
+          # because a prompt-injected agent could echo the key at runtime before the
+          # redaction pass runs — redaction is a mitigation, not a sandbox. Taking the
+          # expiring half of that advice: the diagnostic value of a transcript is
+          # measured in days, so keeping it longer only grows the exposure window.
+          # The residual exposure is accepted because the job is fork-gated (line 25),
+          # so only same-repo PRs — authored by the maintainer — ever run the agent.
+          # If this repo ever takes outside contributions, drop session-dir here.
+          retention-days: 7
