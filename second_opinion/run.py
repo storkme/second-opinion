@@ -548,38 +548,52 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
     env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
     prior_files = _list_session_files(session_dir)
     try:
-        # input=None keeps today's inherited-stdin behavior for the inline path;
-        # a str pipes it (non-TTY), which pi reads as the verbatim initial prompt.
-        p = subprocess.run(cmd, cwd=wt, capture_output=True, text=True,
-                           timeout=PASS_TIMEOUT_S, env=env, input=stdin_input)
-    except subprocess.TimeoutExpired as e:
-        # The exception carries the partial output captured before the kill (stdout in
-        # `output`, stderr in `stderr`) — surface it so a blocked pass is diagnosable
-        # from the log, not a silent black box.
-        tail = _peek(e.stderr or e.output or "")
-        note = f" — partial output: {tail}" if tail else ""
-        log(f"pi pass timed out after {PASS_TIMEOUT_S}s{note}")
-        _annotate("warning", f"pi pass timed out after {PASS_TIMEOUT_S}s — no review produced{note}")
-        return _finish_pass(model, session_dir, internal, "", "timeout", prior_files)
-    if p.returncode != 0:
-        # Surface the failure (bad key, 402 out-of-credits, unknown model id, server
-        # 4xx/OOM) instead of leaving only a "0c" line. Partial stdout from a crash isn't
-        # trustworthy. The annotation carries WHY (e.g. the 402 message) to the operator.
-        detail = " ".join((p.stderr or p.stdout or "").split())[:200]
-        log(f"pi pass exited {p.returncode}: {detail}")
-        _annotate("error", f"pi exited {p.returncode} — {detail[:150]}")
-        return _finish_pass(model, session_dir, internal, "", "error", prior_files)
-    text = (p.stdout or "").strip()
-    if not text:
-        # Exit 0 with nothing to say: the model returned no review at all. Treat as a
-        # degraded pass, not a clean bill of health. A silent pass can still carry a tale
-        # in stderr (a provider warning, an empty assistant message pi relayed) — surface
-        # it so the failure isn't a black box.
-        note = f" — stderr: {_peek(p.stderr)}" if (p.stderr or "").strip() else ""
-        log(f"pi pass exited 0 but produced no review output{note}")
-        _annotate("warning", f"pass completed but produced no review output{note}")
-        return _finish_pass(model, session_dir, internal, "", "empty", prior_files)
-    return _finish_pass(model, session_dir, internal, text, "ok", prior_files)
+        try:
+            # input=None keeps today's inherited-stdin behavior for the inline path;
+            # a str pipes it (non-TTY), which pi reads as the verbatim initial prompt.
+            p = subprocess.run(cmd, cwd=wt, capture_output=True, text=True,
+                               timeout=PASS_TIMEOUT_S, env=env, input=stdin_input)
+        except subprocess.TimeoutExpired as e:
+            # The exception carries the partial output captured before the kill (stdout in
+            # `output`, stderr in `stderr`) — surface it so a blocked pass is diagnosable
+            # from the log, not a silent black box.
+            tail = _peek(e.stderr or e.output or "")
+            note = f" — partial output: {tail}" if tail else ""
+            log(f"pi pass timed out after {PASS_TIMEOUT_S}s{note}")
+            _annotate("warning", f"pi pass timed out after {PASS_TIMEOUT_S}s — no review produced{note}")
+            return _finish_pass(model, session_dir, internal, "", "timeout", prior_files)
+        if p.returncode != 0:
+            # Surface the failure (bad key, 402 out-of-credits, unknown model id, server
+            # 4xx/OOM) instead of leaving only a "0c" line. Partial stdout from a crash isn't
+            # trustworthy. The annotation carries WHY (e.g. the 402 message) to the operator.
+            detail = " ".join((p.stderr or p.stdout or "").split())[:200]
+            log(f"pi pass exited {p.returncode}: {detail}")
+            _annotate("error", f"pi exited {p.returncode} — {detail[:150]}")
+            return _finish_pass(model, session_dir, internal, "", "error", prior_files)
+        text = (p.stdout or "").strip()
+        if not text:
+            # Exit 0 with nothing to say: the model returned no review at all. Treat as a
+            # degraded pass, not a clean bill of health. A silent pass can still carry a tale
+            # in stderr (a provider warning, an empty assistant message pi relayed) — surface
+            # it so the failure isn't a black box.
+            note = f" — stderr: {_peek(p.stderr)}" if (p.stderr or "").strip() else ""
+            log(f"pi pass exited 0 but produced no review output{note}")
+            _annotate("warning", f"pass completed but produced no review output{note}")
+            return _finish_pass(model, session_dir, internal, "", "empty", prior_files)
+        return _finish_pass(model, session_dir, internal, text, "ok", prior_files)
+    finally:
+        # Safety net for the paths _finish_pass never reaches. Redaction lives ONLY
+        # in _finish_pass, which every normal return goes through — but an exception
+        # escaping this function (a UnicodeDecodeError out of text=True on non-UTF-8
+        # stderr, an OSError, anything not TimeoutExpired) would leave pi's partial
+        # JSONL RAW on disk. A consumer persisting session-dir may then publish it,
+        # and that failure surfaces as a FAILED job, not a cancelled one, so a
+        # workflow-side `!cancelled()` guard does not cover it. Both operations are
+        # idempotent, so repeating them after a normal return is harmless.
+        if internal:
+            shutil.rmtree(session_dir, ignore_errors=True)
+        else:
+            _redact_transcripts(session_dir)
 
 
 def _chat(base_url: str, api_key: str, model: str, prompt: str, meta: dict | None = None) -> str:

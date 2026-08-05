@@ -69,17 +69,17 @@ jobs:
           # namespaces; passing the runner path here would write nowhere useful.
           session-dir: /github/workspace/second-opinion-sessions
       - name: Upload review session transcripts
-        # NOT always(): that also fires on CANCELLATION, and cancellation is the one
-        # case where the transcript is guaranteed UNREDACTED. Secret scrubbing runs only
-        # in _finish_pass (run.py:501), reachable solely from the four normal-completion
-        # returns of _run_pass_argv. A cancel — realistically, pushing a second commit
-        # during a long pass, given cancel-in-progress above — or the job timeout kills
-        # pi externally, so _finish_pass never runs and pi's partial JSONL is left raw.
-        # Uploading that to a world-downloadable artifact would be worse than the
-        # exposure the retention note below accepts: there redaction runs and is merely
-        # imperfect; here it never runs at all.
-        # `!cancelled()` still covers every case worth capturing — a degraded pass exits
-        # 2, which is failure(), and that is exactly when the transcript is wanted.
+        # NOT always(): that also fires on CANCELLATION, where an externally-killed pi
+        # leaves its partial JSONL behind with no chance to scrub it — pushing a second
+        # commit during a long pass does this, given cancel-in-progress above.
+        # This guard is NOT the whole defence. Redaction lives in _finish_pass, which
+        # only the normal returns reach, so an unhandled exception would ALSO leave a raw
+        # transcript — and that surfaces as a failed job, not a cancelled one, so
+        # !cancelled() would happily upload it. That hole is closed in run.py, where a
+        # finally re-runs the scrub on every exit path; this guard covers the one case
+        # that never re-enters Python at all.
+        # It still captures everything worth having: a degraded pass exits 2, which is
+        # failure(), and that is exactly when the transcript is wanted.
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:

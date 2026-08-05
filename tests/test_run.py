@@ -343,6 +343,48 @@ def test_run_pass_empty_surfaces_stderr_for_diagnosis():
     assert "empty completion" in ann[0][1]
 
 
+def test_transcript_is_redacted_even_when_the_pass_raises():
+    # Redaction lives only in _finish_pass, which an exception escaping _run_pass_argv
+    # never reaches — so a non-TimeoutExpired failure used to leave pi's partial JSONL
+    # RAW in a persisted session dir. That surfaces as a FAILED job, not a cancelled one,
+    # so no workflow-side guard covers it; the consumer publishes the raw file.
+    import shutil
+    key = "sk-or-v1-" + "a" * 40
+    real_env = os.environ.get("OPENROUTER_API_KEY")
+    real_run = run.subprocess.run
+    session = tempfile.mkdtemp(prefix="so-raise-")
+    os.environ["OPENROUTER_API_KEY"] = key
+    os.environ["PI_SESSION_DIR"] = session
+    try:
+        def writes_then_explodes(cmd, **k):
+            sd = cmd[cmd.index("--session-dir") + 1]
+            os.makedirs(sd, exist_ok=True)
+            with open(os.path.join(sd, "s.jsonl"), "w") as fh:
+                fh.write('{"message":{"content":"the key is ' + key + '"}}\n')
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad stderr byte")
+
+        run.subprocess.run = writes_then_explodes
+        try:
+            run.run_pass("/wt", "m", "sys", "usr")
+        except UnicodeDecodeError:
+            pass  # the exception still propagates; only the scrub is guaranteed
+        else:
+            raise AssertionError("expected the exception to propagate")
+        left = [os.path.join(r, f) for r, _d, fs in os.walk(session) for f in fs]
+        assert left, "no transcript written — test would pass vacuously"
+        blob = "".join(open(f, encoding="utf-8").read() for f in left)
+        assert key not in blob, "raw API key survived in a persisted transcript"
+        assert "REDACTED" in blob, blob[:200]
+    finally:
+        run.subprocess.run = real_run
+        os.environ.pop("PI_SESSION_DIR", None)
+        if real_env is None:
+            os.environ.pop("OPENROUTER_API_KEY", None)
+        else:
+            os.environ["OPENROUTER_API_KEY"] = real_env
+        shutil.rmtree(session, ignore_errors=True)
+
+
 def test_should_fail_only_on_degraded_without_post():
     # The exit-2 contract: a degraded pass that posted nothing is the only failure.
     assert (
