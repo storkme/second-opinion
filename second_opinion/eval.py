@@ -125,22 +125,32 @@ def review_diff(rec: dict, model: str) -> str:
     """Run second-opinion's agentic reviewer (K passes, unioned when run.K>1 — same as
     production) on the reconstructed diff, in a worktree at the reviewed commit. So the eval
     measures the reviewer AS CONFIGURED (model, K, provider). Returns the review text."""
-    filtered, _files, _trunc = rv.filter_diff(rec["diff"], run._exclude_globs(), run.MAX_DIFF_CHARS)
+    fd = rv.filter_diff(rec["diff"], run._exclude_globs(), run.MAX_DIFF_CHARS)
+    filtered = fd.text
     if not filtered.strip():
         return ""
     system = rv.system_prompt(run.PROJECT, run._guidance())
+    # Truncation handling comes from the SAME helpers production uses. This used to be a
+    # hand-copied user_turn with no truncation handling at all, so on any diff over the cap
+    # the eval measured the pre-remediation reviewer while reporting it as "AS CONFIGURED" —
+    # biased worst on large PRs, which is exactly where a recall question usually lives.
+    full_diff_rel = ""
 
     def user_turn(diff_text: str) -> str:
         return (f"PR #{rec['pr']}: {rec['title']}\n\nThe full repository is checked out in your "
                 f"working directory at the reviewed commit. Use your tools (read, grep via bash) "
                 f"to inspect callers, tests, and definitions. The change to review is this diff:"
-                f"\n\n{diff_text}\n")
+                f"\n\n{diff_text}\n"
+                + run.truncation_notice(fd, full_diff_rel))
 
     wt = os.path.join(tempfile.gettempdir(), f"second-opinion-eval-pr{rec['pr']}")
     run._git(["worktree", "remove", "--force", wt], check=False)
     add = run._git(["worktree", "add", "--detach", "--force", wt, rec["target"]], check=False)
     if add.returncode != 0:
         raise RuntimeError(f"worktree add @ {rec['target'][:10]}: {add.stderr.strip()[:120]}")
+    if fd.truncated:
+        full_diff_rel = run.write_full_diff(fd, wt, rec["pr"])
+        log(f"#{rec['pr']}: diff truncated — excerpt {run.coverage_phrase(fd)}")
     passes: list[str] = []
     try:
         for i in range(run.K):

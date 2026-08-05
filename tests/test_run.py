@@ -447,7 +447,7 @@ def test_footer_does_not_claim_an_on_disk_diff_that_was_never_written():
     body, _ = _drive_review_pr_body(4246, diff, max_chars=2500, make_worktree=True)
     assert "supplied to the agent on disk" in body, body[-600:]
     assert "could not be supplied" not in body
-    assert "1 of 6 changed files" in body, body[-600:]
+    assert "1 of 6 changed file(s)" in body, body[-600:]
 
 
 def test_truncation_emits_exactly_one_coverage_annotation():
@@ -459,7 +459,7 @@ def test_truncation_emits_exactly_one_coverage_annotation():
         _, ann, wt = _drive_review_pr(4247 if make_wt else 4248, diff, 2500,
                                       make_worktree=make_wt)
         try:
-            cov = [m for lvl, m in ann if lvl == "warning" and "changed files" in m]
+            cov = [m for lvl, m in ann if lvl == "warning" and "changed file(s)" in m]
             assert len(cov) == 1, cov
             if make_wt:
                 assert "supplied on disk" in cov[0]
@@ -501,7 +501,7 @@ def test_truncated_diff_writes_the_full_diff_and_points_the_agent_at_it():
     # every file behind it (spaghettio#575: 1 of 16 files, 1.7%, green check). The excerpt
     # may be capped, but the remainder must stay reachable.
     import shutil
-    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    diff = _multifile_diff(n_files=6, chunk_chars=12000)   # >50KB total: paging applies
     prompt, ann, wt = _drive_review_pr(4242, diff, max_chars=2500)
     try:
         path = os.path.join(wt, run.FULL_DIFF_NAME)
@@ -516,9 +516,9 @@ def test_truncated_diff_writes_the_full_diff_and_points_the_agent_at_it():
         assert run.FULL_DIFF_NAME in prompt
         assert "src/f05.rs" in prompt, "dropped files must be named in the prompt"
         # ...and the operator sees it in the checks UI, with numbers, not just a vibe.
-        warn = [m for lvl, m in ann if lvl == "warning" and "changed files" in m]
+        warn = [m for lvl, m in ann if lvl == "warning" and "changed file(s)" in m]
         assert warn, ann
-        assert "of 6 changed files" in warn[0], warn[0]
+        assert "of 6 changed file(s)" in warn[0], warn[0]
     finally:
         shutil.rmtree(wt, ignore_errors=True)
 
@@ -529,7 +529,7 @@ def test_full_diff_puts_the_unseen_files_first_within_one_read():
     # excerpt already carried, so the agent could "read the complete diff" and see
     # nothing new. The files it is missing must lead.
     import shutil
-    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    diff = _multifile_diff(n_files=6, chunk_chars=12000)   # >50KB total: paging applies
     prompt, _ann, wt = _drive_review_pr(4249, diff, max_chars=2500)
     try:
         full = open(os.path.join(wt, run.FULL_DIFF_NAME), encoding="utf-8").read()
@@ -558,30 +558,89 @@ def test_single_file_clipped_mid_hunk_is_not_described_as_full_coverage():
     diff = _multifile_diff(n_files=1, chunk_chars=6000)
     prompt, ann, wt = _drive_review_pr(4250, diff, max_chars=2500)
     try:
-        assert "1 of 1 changed files" not in prompt, prompt[-400:]
-        assert "CUT OFF mid-file" in prompt, prompt[-400:]
+        assert "1 of 1 changed file(s)" not in prompt, prompt[-400:]
+        assert "is cut off mid-file" in prompt, prompt[-400:]
         # No dropped files, so no empty "absent from the excerpt" list.
         assert "absent from the excerpt" not in prompt, prompt[-400:]
         cov = [m for lvl, m in ann if lvl == "warning" and "excerpt" in m]
-        assert cov and "cuts the last one off mid-file" in cov[0], cov
+        assert cov and "is cut off mid-file" in cov[0], cov
         assert "Not in the excerpt:" not in cov[0], cov[0]
         # The file's own header must agree with all of the above. With nothing dropped
         # the reorder is a no-op, so the TOP repeats the excerpt and the missing material
         # is the TAIL — pointing the agent at the top would be actively wrong.
         head = open(os.path.join(wt, run.FULL_DIFF_NAME), encoding="utf-8").read()[:700]
-        assert "the material you are missing is the TAIL" in head, head
+        assert "is the TAIL" in head, head
         assert "Page DOWN" in head, head
         assert "ordered FIRST" not in head, head
-        assert "1 of 1 changed files" not in head, head
+        assert "1 of 1 changed file(s)" not in head, head
     finally:
         shutil.rmtree(wt, ignore_errors=True)
 
     body, wt2 = _drive_review_pr_body(4251, diff, max_chars=2500)
     try:
-        assert "covered 1 of 1 changed files" not in body, body[-500:]
-        assert "cut off mid-file" in body, body[-500:]
+        assert "covers 1 of 1 changed file(s)" not in body, body[-500:]
+        assert "is cut off mid-file" in body, body[-500:]
     finally:
         shutil.rmtree(wt2, ignore_errors=True)
+
+
+def test_eval_review_diff_discloses_truncation_like_production():
+    # #26: eval had its own hand-copied user_turn with no truncation handling, so on any
+    # diff over the cap it measured the PRE-remediation reviewer while its docstring
+    # promised "the reviewer AS CONFIGURED". Both callers must now use the same helpers.
+    import shutil
+    from second_opinion import eval as ev
+    real = (run.K, run.run_pass, run.merge_reviews, run.MAX_DIFF_CHARS, run._git, run._guidance)
+    run.K, run.MAX_DIFF_CHARS = 1, 2500
+    run._git = lambda args, check=True: FakeProc(0)
+    run._guidance = lambda: ""
+    wt = os.path.join(tempfile.gettempdir(), "second-opinion-eval-pr77")
+    shutil.rmtree(wt, ignore_errors=True)
+    os.makedirs(wt, exist_ok=True)
+    seen = {}
+    run.run_pass = lambda w, m, s, u, session_dir=None: (
+        seen.__setitem__("prompt", u), run.PassResult("finding", "ok"))[1]
+    try:
+        rec = {"pr": 77, "title": "t", "target": "cafebabe",
+               "diff": _multifile_diff(n_files=6, chunk_chars=12000)}
+        ev.review_diff(rec, "m")
+        prompt = seen["prompt"]
+        assert "TRUNCATED" in prompt, prompt[-400:]
+        assert "1 of 6 changed file(s)" in prompt, prompt[-400:]
+        assert "src/f05.rs" in prompt, "missing files must be named"
+        # ...and the full diff is on disk for it, exactly as in production.
+        assert os.path.exists(os.path.join(wt, run.FULL_DIFF_NAME))
+        assert run.FULL_DIFF_NAME in prompt
+    finally:
+        run.K, run.run_pass, run.merge_reviews, run.MAX_DIFF_CHARS, run._git, run._guidance = real
+        shutil.rmtree(wt, ignore_errors=True)
+
+
+def test_notice_flags_a_later_hunk_of_an_already_seen_file():
+    # #27: a path with two diff chunks where the first fits and the second doesn't is
+    # neither "wholly missing" nor "clipped" — it's present but incomplete. A filename-set
+    # difference called it neither, so nothing was disclosed at all.
+    one = ("diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n+x\n")
+    two = one + ("diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -9 +9 @@\n"
+                 + "".join(f"+pad {i}\n" for i in range(300)))
+    fd = run.rv.filter_diff(two, [], len(one) + 10)
+    assert fd.partial_files == ["src/a.py"], fd
+    notice = run.truncation_notice(fd, run.FULL_DIFF_NAME)
+    assert "a later hunk of src/a.py is missing" in notice, notice
+    # It must NOT be described as wholly absent, nor as a mid-file clip.
+    assert "absent from the excerpt" not in notice, notice
+    assert "is cut off mid-file" not in notice, notice
+
+
+def test_notice_does_not_claim_paging_when_the_full_diff_fits_one_read():
+    # #27: "LARGER than a single read returns" was asserted unconditionally. True at the
+    # default cap, false if an operator lowers MAX_DIFF_CHARS below pi's ~50KB read limit.
+    small = _multifile_diff(n_files=3, chunk_chars=300)
+    fd = run.rv.filter_diff(small, [], 400)
+    assert fd.truncated and len(fd.full_text.encode()) < run.AGENT_READ_BYTES
+    notice = run.truncation_notice(fd, run.FULL_DIFF_NAME)
+    assert "fits in a single read" in notice, notice
+    assert "LARGER than a single read" not in notice, notice
 
 
 def test_untruncated_diff_adds_no_file_and_no_truncation_note():
@@ -591,7 +650,7 @@ def test_untruncated_diff_adds_no_file_and_no_truncation_note():
     try:
         assert not os.path.exists(os.path.join(wt, run.FULL_DIFF_NAME))
         assert "TRUNCATED" not in prompt and run.FULL_DIFF_NAME not in prompt
-        assert not [m for _l, m in ann if "changed files" in m], ann
+        assert not [m for _l, m in ann if "changed file(s)" in m], ann
     finally:
         shutil.rmtree(wt, ignore_errors=True)
 
@@ -608,10 +667,10 @@ def test_failed_write_still_tells_the_agent_the_diff_is_truncated():
     assert run.FULL_DIFF_NAME not in prompt, "prompt points at an unwritten file"
     # ...but the truncation itself is still disclosed, with the missing files named.
     assert "TRUNCATED" in prompt, "agent was handed a partial diff with no disclosure"
-    assert "1 of 6 changed files" in prompt
+    assert "1 of 6 changed file(s)" in prompt
     assert "src/f05.rs" in prompt
     # It is told to read the checkout, and explicitly NOT to diff (shallow, no base ref).
-    assert "checked out at the PR's head commit" in prompt
+    assert "checked out at the reviewed commit" in prompt
     assert "cannot diff them against the base" in prompt
     assert [m for lvl, m in ann
             if lvl == "warning" and "could NOT be written" in m and "excerpt ONLY" in m], ann
