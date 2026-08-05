@@ -634,13 +634,35 @@ def test_notice_flags_a_later_hunk_of_an_already_seen_file():
 
 def test_notice_does_not_claim_paging_when_the_full_diff_fits_one_read():
     # #27: "LARGER than a single read returns" was asserted unconditionally. True at the
-    # default cap, false if an operator lowers MAX_DIFF_CHARS below pi's ~50KB read limit.
+    # default cap, false if an operator lowers MAX_DIFF_CHARS below pi's read limit.
     small = _multifile_diff(n_files=3, chunk_chars=300)
     fd = run.rv.filter_diff(small, [], 400)
-    assert fd.truncated and len(fd.full_text.encode()) < run.AGENT_READ_BYTES
+    assert fd.truncated
+    assert len(fd.full_text.encode()) < run.AGENT_READ_BYTES
+    assert fd.full_text.count("\n") < run.AGENT_READ_LINES
     notice = run.truncation_notice(fd, run.FULL_DIFF_NAME)
     assert "fits in a single read" in notice, notice
     assert "LARGER than a single read" not in notice, notice
+
+
+def test_a_line_dense_diff_under_the_byte_cap_still_needs_paging():
+    # pi truncates a read at 2000 LINES *or* 50KB, whichever hits first. Gating the
+    # "fits in a single read" claim on bytes alone lets a line-dense diff — under the byte
+    # cap but over the line cap — be advertised as readable in one go, so the agent stops
+    # after seeing two-thirds of it. That is this PR's own bug class, in the path this PR
+    # added to fix it.
+    # 450 tiny chunks x 5 lines = 2250 lines in ~37KB: under the byte cap, over the lines cap.
+    dense = "".join(
+        f"diff --git a/s/f{i:03d}.rs b/s/f{i:03d}.rs\n"
+        f"--- a/s/f{i:03d}.rs\n+++ b/s/f{i:03d}.rs\n@@ -1 +1 @@\n+x\n"
+        for i in range(450))
+    fd = run.rv.filter_diff(dense, [], 20000)
+    assert fd.truncated
+    assert len(fd.full_text.encode()) < run.AGENT_READ_BYTES      # under the byte cap...
+    assert fd.full_text.count("\n") > run.AGENT_READ_LINES        # ...but over the line cap
+    notice = run.truncation_notice(fd, run.FULL_DIFF_NAME)
+    assert "fits in a single read" not in notice, notice
+    assert "LARGER than a single read" in notice, notice
 
 
 def test_untruncated_diff_adds_no_file_and_no_truncation_note():

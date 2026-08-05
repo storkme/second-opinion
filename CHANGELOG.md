@@ -21,7 +21,9 @@ All notable changes to this project are documented here. The format follows
   - A file carried in the excerpt but cut mid-hunk is named as such even when other files
     were also dropped, instead of the excerpt reading as though it held that file whole.
   - "Larger than a single read" is claimed only when the on-disk diff actually exceeds an
-    agent read tool's ~50KB limit, rather than unconditionally.
+    agent read tool's limits, rather than unconditionally — and checks **both** of them
+    (pi truncates at 2000 lines *or* 50KiB, whichever hits first), so a line-dense diff
+    under the byte cap is not advertised as readable in one go.
 - **`second-opinion-eval` measures the reviewer it claims to.** `eval.review_diff` carried a
   hand-copied `user_turn` with no truncation handling, so on any diff over `max-diff-chars`
   it fed the agent a capped excerpt with no disclosure and no on-disk full diff — measuring

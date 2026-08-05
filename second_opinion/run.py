@@ -711,10 +711,18 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
     return "\n\n---\n\n".join(parts)
 
 
-# pi's read tool returns at most 2000 lines or 50KB, whichever hits first. Used only to
-# decide whether to TELL the agent the file needs paging — claiming it does when it
-# doesn't is the same class of inaccuracy as the bugs this machinery exists to prevent.
-AGENT_READ_BYTES = 50000
+# An agent read tool truncates on TWO independent limits, whichever hits first — pi's are
+# DEFAULT_MAX_LINES = 2000 and DEFAULT_MAX_BYTES = 50 * 1024. Both matter: a line-dense
+# diff can sit under the byte cap and still be cut short, so checking bytes alone would
+# advertise "fits in a single read" for a file the agent only partly receives — the same
+# inaccuracy this machinery exists to prevent, in the code meant to prevent it.
+AGENT_READ_BYTES = 50 * 1024
+AGENT_READ_LINES = 2000
+
+
+def exceeds_one_read(text: str) -> bool:
+    """True when an agent's single `read` cannot return all of `text`."""
+    return _bytes(text) > AGENT_READ_BYTES or text.count("\n") > AGENT_READ_LINES
 
 
 def coverage_phrase(fd: rv.FilteredDiff) -> str:
@@ -753,14 +761,15 @@ def write_full_diff(fd: rv.FilteredDiff, wt: str, pr: int) -> str:
         lines.append("# The excerpt carried every changed file, but is cut short. Order here is\n"
                      "# unchanged, so the TOP repeats what you already saw — what you are missing\n"
                      "# is the TAIL. Page DOWN to reach it.\n")
-    if _bytes(fd.full_text) > AGENT_READ_BYTES:
+    if exceeds_one_read(fd.full_text):
         lines.append("# This file is larger than a single read returns.\n")
     try:
         with open(os.path.join(wt, FULL_DIFF_NAME), "w", encoding="utf-8") as fh:
             fh.write("".join(lines) + "\n" + ordered)
     except OSError as e:
-        _annotate("warning", f"#{pr}: could not write the full diff for the agent "
-                             f"({' '.join(str(e).split())[:120]})")
+        # Deliberately silent: the caller emits exactly one annotation describing both the
+        # coverage and the write outcome. Annotating here too produced a contradictory pair.
+        log(f"#{pr}: could not write the full diff — {' '.join(str(e).split())[:120]}")
         return ""
     return FULL_DIFF_NAME
 
@@ -776,7 +785,7 @@ def truncation_notice(fd: rv.FilteredDiff, full_diff_rel: str) -> str:
     if full_diff_rel:
         out.append(f"The COMPLETE diff is in your working directory at `./{full_diff_rel}` "
                    f"(it is not part of the PR — it was placed there for you). ")
-        if _bytes(fd.full_text) > AGENT_READ_BYTES:
+        if exceeds_one_read(fd.full_text):
             out.append("It is LARGER than a single read returns, so ")
             out.append(f"the {len(fd.missing_files)} file(s) absent from the excerpt are "
                        f"ordered FIRST in it: read from the TOP, then page onwards"
