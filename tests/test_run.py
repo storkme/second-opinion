@@ -549,6 +549,33 @@ def test_full_diff_puts_the_unseen_files_first_within_one_read():
         shutil.rmtree(wt, ignore_errors=True)
 
 
+def test_single_file_clipped_mid_hunk_is_not_described_as_full_coverage():
+    # filter_diff's single-chunk branch: one file overflows the cap on its own, so it
+    # lands in `files` and nothing is "dropped". Saying "1 of 1 changed files" there reads
+    # as FULL coverage while the file is cut mid-hunk — this PR's own headline bug in the
+    # one shape it hadn't covered.
+    import shutil
+    diff = _multifile_diff(n_files=1, chunk_chars=6000)
+    prompt, ann, wt = _drive_review_pr(4250, diff, max_chars=2500)
+    try:
+        assert "1 of 1 changed files" not in prompt, prompt[-400:]
+        assert "CUT OFF mid-file" in prompt, prompt[-400:]
+        # No dropped files, so no empty "absent from the excerpt" list.
+        assert "absent from the excerpt" not in prompt, prompt[-400:]
+        cov = [m for lvl, m in ann if lvl == "warning" and "excerpt" in m]
+        assert cov and "cuts the last one off mid-file" in cov[0], cov
+        assert "Not in the excerpt:" not in cov[0], cov[0]
+    finally:
+        shutil.rmtree(wt, ignore_errors=True)
+
+    body, wt2 = _drive_review_pr_body(4251, diff, max_chars=2500)
+    try:
+        assert "covered 1 of 1 changed files" not in body, body[-500:]
+        assert "cut off mid-file" in body, body[-500:]
+    finally:
+        shutil.rmtree(wt2, ignore_errors=True)
+
+
 def test_untruncated_diff_adds_no_file_and_no_truncation_note():
     import shutil
     diff = _multifile_diff(n_files=2, chunk_chars=200)

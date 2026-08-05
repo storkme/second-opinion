@@ -190,11 +190,11 @@ def reorder_unseen_first(diff: str, unseen: list[str]) -> str:
     missing files first means one read lands on material the excerpt lacked.
 
     The unseen chunks are further ordered SMALLEST FIRST, because the read cap is a
-    budget and one huge file spends all of it. On spaghettio#575, unseen-in-path-order
-    put a 334KB generated JSON at the top, so a single read still reached exactly one
-    file; smallest-first spends the same 50KB on roughly eight, which is the difference
-    between "reachable" and "reachable in practice". The agent is told to page for the
-    rest either way."""
+    budget and one huge file spends all of it. Unseen-first alone is not enough: if the
+    first unseen chunk is a large generated file it consumes the whole read and the agent
+    still sees one file. Smallest-first spends that same budget on many, which is the
+    difference between "reachable" and "reachable in practice". The agent is told to page
+    for the rest either way."""
     want = set(unseen)
     chunks = _split_by_file(diff)
     first = sorted((c for c in chunks if _file_of_chunk(c) in want), key=len)
