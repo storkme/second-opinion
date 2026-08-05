@@ -720,9 +720,25 @@ AGENT_READ_BYTES = 50 * 1024
 AGENT_READ_LINES = 2000
 
 
-def exceeds_one_read(text: str) -> bool:
-    """True when an agent's single `read` cannot return all of `text`."""
-    return _bytes(text) > AGENT_READ_BYTES or text.count("\n") > AGENT_READ_LINES
+# write_full_diff prepends an explanatory header. Both the prompt and that header must
+# reach the SAME paging verdict, so both budget for it — otherwise a diff sitting just
+# under either cap flips over it once the header lands, and the file claims to fit in one
+# read while the agent receives all but the tail.
+FULL_DIFF_HEADER_PAD_BYTES = 600
+FULL_DIFF_HEADER_PAD_LINES = 10
+
+
+def exceeds_one_read(text: str, pad_bytes: int = 0, pad_lines: int = 0) -> bool:
+    """True when an agent's single `read` cannot return all of `text` (plus any padding
+    the caller knows will be prepended)."""
+    return (_bytes(text) + pad_bytes > AGENT_READ_BYTES
+            or text.count("\n") + pad_lines > AGENT_READ_LINES)
+
+
+def _needs_paging(fd: rv.FilteredDiff) -> bool:
+    """The single paging verdict, shared by the prompt and the on-disk header."""
+    return exceeds_one_read(fd.full_text, FULL_DIFF_HEADER_PAD_BYTES,
+                            FULL_DIFF_HEADER_PAD_LINES)
 
 
 def coverage_phrase(fd: rv.FilteredDiff) -> str:
@@ -761,7 +777,7 @@ def write_full_diff(fd: rv.FilteredDiff, wt: str, pr: int) -> str:
         lines.append("# The excerpt carried every changed file, but is cut short. Order here is\n"
                      "# unchanged, so the TOP repeats what you already saw — what you are missing\n"
                      "# is the TAIL. Page DOWN to reach it.\n")
-    if exceeds_one_read(fd.full_text):
+    if _needs_paging(fd):
         lines.append("# This file is larger than a single read returns.\n")
     try:
         with open(os.path.join(wt, FULL_DIFF_NAME), "w", encoding="utf-8") as fh:
@@ -785,7 +801,7 @@ def truncation_notice(fd: rv.FilteredDiff, full_diff_rel: str) -> str:
     if full_diff_rel:
         out.append(f"The COMPLETE diff is in your working directory at `./{full_diff_rel}` "
                    f"(it is not part of the PR — it was placed there for you). ")
-        if exceeds_one_read(fd.full_text):
+        if _needs_paging(fd):
             out.append("It is LARGER than a single read returns, so ")
             out.append(f"the {len(fd.missing_files)} file(s) absent from the excerpt are "
                        f"ordered FIRST in it: read from the TOP, then page onwards"

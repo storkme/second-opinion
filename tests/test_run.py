@@ -497,7 +497,7 @@ def _drive_review_pr(pr, diff, max_chars, make_worktree=True):
 
 
 def test_truncated_diff_writes_the_full_diff_and_points_the_agent_at_it():
-    # filter_diff stops at the first chunk that overflows, so a big early file starves
+    # filter_diff keeps a big early file and drops what follows, so it starves
     # every file behind it (spaghettio#575: 1 of 16 files, 1.7%, green check). The excerpt
     # may be capped, but the remainder must stay reachable.
     import shutil
@@ -663,6 +663,35 @@ def test_a_line_dense_diff_under_the_byte_cap_still_needs_paging():
     notice = run.truncation_notice(fd, run.FULL_DIFF_NAME)
     assert "fits in a single read" not in notice, notice
     assert "LARGER than a single read" in notice, notice
+
+
+def test_prompt_and_on_disk_header_agree_on_paging_at_the_boundary():
+    # The written file is header + diff, so a diff just under either cap flips over it
+    # once the header lands. If the prompt and the header disagreed there, one of them
+    # would claim the file fits in a read that truncates it. Both budget for the header.
+    import shutil
+    # ~1995 lines: under the 2000 cap on its own, over it once a ~7-line header prepends.
+    boundary = "".join(
+        f"diff --git a/s/f{i:03d}.rs b/s/f{i:03d}.rs\n"
+        f"--- a/s/f{i:03d}.rs\n+++ b/s/f{i:03d}.rs\n@@ -1 +1 @@\n+x\n"
+        for i in range(399))
+    fd = run.rv.filter_diff(boundary, [], 20000)
+    lines = fd.full_text.count("\n")
+    assert run.AGENT_READ_LINES - run.FULL_DIFF_HEADER_PAD_LINES < lines <= run.AGENT_READ_LINES, lines
+    notice = run.truncation_notice(fd, run.FULL_DIFF_NAME)
+    prompt_says_paging = "LARGER than a single read" in notice
+    assert prompt_says_paging, "header pushes it over the line cap — must not claim it fits"
+
+    wt = os.path.join(tempfile.gettempdir(), "second-opinion-boundary")
+    shutil.rmtree(wt, ignore_errors=True)
+    os.makedirs(wt)
+    try:
+        run.write_full_diff(fd, wt, 1)
+        head = open(os.path.join(wt, run.FULL_DIFF_NAME), encoding="utf-8").read()[:600]
+        file_says_paging = "larger than a single read" in head
+        assert file_says_paging == prompt_says_paging, (prompt_says_paging, head)
+    finally:
+        shutil.rmtree(wt, ignore_errors=True)
 
 
 def test_untruncated_diff_adds_no_file_and_no_truncation_note():
