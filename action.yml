@@ -53,9 +53,12 @@ inputs:
     required: false
     default: ""
   pass-timeout-seconds:
-    description: "Per-pass timeout."
+    description: "Per-pass timeout. Keep the calling job's timeout-minutes comfortably
+      above this: if the job cap fires first it cancels mid-pass, skipping the degraded
+      report entirely (no annotation, no failure notice) — strictly worse than a pass
+      timeout."
     required: false
-    default: "900"
+    default: "1800"
   session-dir:
     description: "Directory where pi writes its JSONL session transcripts. When set, each
       pass's full agent transcript is saved there (instead of pi's ephemeral --no-session

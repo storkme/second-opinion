@@ -30,7 +30,7 @@ Env:
   GUIDANCE / GUIDANCE_FILE   per-project review checklist ("memory")
   EXCLUDE_GLOBS       comma-separated globs to drop (default: lockfiles/build/images)
   MAX_DIFF_CHARS      diff cap (default 60000)
-  PASS_TIMEOUT_S      per-pass timeout (default: 900 openrouter / 1800 local)
+  PASS_TIMEOUT_S      per-pass timeout (default 1800; the calling job's budget must exceed it)
   TOOLS               pi tool grant (default read,bash; set read to drop shell)
   PI_REASONING        whether the model is a reasoning model (default true)
   FAIL_ON_DEGRADED    exit 2 when a degraded pass posts no review (default true; set
@@ -79,7 +79,7 @@ MERGE_PROVIDER = os.environ.get("MERGE_PROVIDER", "").strip().lower() or PROVIDE
 MERGE_MODEL = os.environ.get("MERGE_MODEL", "").strip()
 MAX_DIFF_CHARS = int(os.environ.get("MAX_DIFF_CHARS", "").strip() or "60000")
 _pt = os.environ.get("PASS_TIMEOUT_S", "").strip()
-PASS_TIMEOUT_S = int(_pt) if _pt else (900 if PROVIDER == "openrouter" else 1800)
+PASS_TIMEOUT_S = int(_pt) if _pt else 1800
 REPO_DIR = os.environ.get("REPO_DIR", "").strip() or os.getcwd()
 PI_FLAGS = ["--no-extensions", "--no-skills", "--no-themes",
             "--no-prompt-templates"]

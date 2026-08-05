@@ -25,14 +25,14 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
-    # Must stay comfortably above the 1500s pass timeout below: if the job cap fires
+    # Must stay comfortably above the 1800s pass timeout below: if the job cap fires
     # first it cancels mid-pass, which skips the degraded path entirely — no annotation,
     # no failure notice, just a job-level kill — so a hit here is strictly worse than a
-    # pass timeout. 35min leaves 600s of slack, the same margin the old 25min/900s pair
-    # had. Measured pre-pass overhead (container build + checkout) is ~30s across recent
+    # pass timeout. 40min leaves 600s of slack — the same margin every prior pairing here has
+    # had (25min/900s, then 35min/1500s). Measured pre-pass overhead (container build + checkout) is ~30s across recent
     # runs — the action's image is rebuilt per run, and this Dockerfile builds in ~28s —
     # so 600s is ~20x the observed need and costs nothing when unused.
-    timeout-minutes: 35
+    timeout-minutes: 40
     permissions:
       contents: read
       pull-requests: write
@@ -49,8 +49,8 @@ jobs:
           # 923k tokens as the diff grew. A dogfood check that fails on its own medium
           # PRs teaches you to ignore it, which is the one thing this tripwire cannot
           # afford. This raises the ceiling, it does not remove it: a pass that genuinely
-          # needs >1500s still reds the check as degraded, since the underlying cause (a
+          # needs >1800s still reds the check as degraded, since the underlying cause (a
           # reasoning model outrunning the wall clock as the diff grows) is unaddressed.
           # If this trips again, the lever is the diff/prompt size or the model, not
           # another timeout bump.
-          pass-timeout-seconds: "1500"
+          pass-timeout-seconds: "1800"

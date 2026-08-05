@@ -121,7 +121,7 @@ agentic path never used.
 | `GUIDANCE` / `GUIDANCE_FILE` | — | per-project checklist ("memory"); file path is repo-relative |
 | `EXCLUDE_GLOBS` | sensible set | comma-separated globs dropped from the diff |
 | `MAX_DIFF_CHARS` | `60000` | diff size cap (whole-file boundaries) |
-| `PASS_TIMEOUT_S` | `900` | per-pass timeout |
+| `PASS_TIMEOUT_S` | `1800` | per-pass timeout (no provider split; the caller's job budget must exceed it) |
 | `PI_SESSION_DIR` | — | when set, pi writes each pass's JSONL session transcript here instead of ephemeral `--no-session`. Point it at a path the consumer persists (e.g. upload as an artifact) so a blocked/empty pass is forensically inspectable. |
 | `TOOLS` | `read,bash` | pi tool grant; `read` drops shell (safer on untrusted authors) |
 | `PI_REASONING` | `true` | honored for **both** providers; set `false` for a non-reasoning model |

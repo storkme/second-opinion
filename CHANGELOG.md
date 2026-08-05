@@ -5,6 +5,24 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Changed
+- **Default `pass-timeout-seconds` raised from 900 to 1800**, and the provider split for this
+  knob is gone (local was already 1800). 900s was measurably too low for a reasoning model on
+  a large diff: spaghettio saw two all-passes-timed-out failures inside 24 hours, and the run
+  that *did* succeed on the same PR used 827/779/787s of the 900s budget — 87–92% utilisation,
+  i.e. a coin flip per run. A timed-out pass posts no review, so under `fail-on-degraded` this
+  surfaces as reviewer malfunction reported like a verdict. Note `K>1` does not protect against
+  it: parallel passes give redundancy when *one* pass fails, but when the cause is systematic
+  every pass hits the wall together.
+
+  **Consumers must keep the calling job's `timeout-minutes` comfortably above this.** If the job
+  cap fires first it cancels mid-pass and skips the degraded report entirely — no annotation, no
+  failure notice — which is strictly worse than a pass timeout. Documented on the input and in
+  the README table, and enforced in this repo's own dogfood workflow (40min job / 1800s pass =
+  600s slack).
+
 ## [1.4.0] - 2026-08-05
 
 ### Changed
