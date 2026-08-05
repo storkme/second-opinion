@@ -453,16 +453,20 @@ def test_footer_does_not_claim_an_on_disk_diff_that_was_never_written():
 def test_truncation_emits_exactly_one_coverage_annotation():
     # Two warnings that contradict each other is worse than one that is accurate: the
     # optimistic one is the one a reader believes.
+    import shutil
     diff = _multifile_diff(n_files=6, chunk_chars=2000)
     for make_wt in (True, False):
-        _, ann, _ = _drive_review_pr(4247 if make_wt else 4248, diff, 2500,
-                                     make_worktree=make_wt)
-        cov = [m for lvl, m in ann if lvl == "warning" and "changed files" in m]
-        assert len(cov) == 1, cov
-        if make_wt:
-            assert "supplied on disk" in cov[0]
-        else:
-            assert "could NOT be written" in cov[0] and "excerpt ONLY" in cov[0]
+        _, ann, wt = _drive_review_pr(4247 if make_wt else 4248, diff, 2500,
+                                      make_worktree=make_wt)
+        try:
+            cov = [m for lvl, m in ann if lvl == "warning" and "changed files" in m]
+            assert len(cov) == 1, cov
+            if make_wt:
+                assert "supplied on disk" in cov[0]
+            else:
+                assert "could NOT be written" in cov[0] and "excerpt ONLY" in cov[0]
+        finally:
+            shutil.rmtree(wt, ignore_errors=True)
 
 
 def _drive_review_pr(pr, diff, max_chars, make_worktree=True):
@@ -515,6 +519,32 @@ def test_truncated_diff_writes_the_full_diff_and_points_the_agent_at_it():
         warn = [m for lvl, m in ann if lvl == "warning" and "changed files" in m]
         assert warn, ann
         assert "of 6 changed files" in warn[0], warn[0]
+    finally:
+        shutil.rmtree(wt, ignore_errors=True)
+
+
+def test_full_diff_puts_the_unseen_files_first_within_one_read():
+    # pi's read returns at most 2000 lines / 50KB, and this file is bigger than that by
+    # construction. In git path order the first read would return the SAME files the
+    # excerpt already carried, so the agent could "read the complete diff" and see
+    # nothing new. The files it is missing must lead.
+    import shutil
+    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    prompt, _ann, wt = _drive_review_pr(4249, diff, max_chars=2500)
+    try:
+        full = open(os.path.join(wt, run.FULL_DIFF_NAME), encoding="utf-8").read()
+        order = [ln.split(" b/")[-1] for ln in full.splitlines()
+                 if ln.startswith("diff --git ")]
+        # f00 is the only file the excerpt carried, so it must NOT lead the file.
+        assert order[0] != "src/f00.rs", order
+        assert order[-1] == "src/f00.rs", order
+        assert set(order) == {f"src/f{i:02d}.rs" for i in range(6)}, order
+        # The header says so too, and warns one read is not the whole file.
+        assert "ordered FIRST" in full, full[:400]
+        assert "larger than a single" in full, full[:400]
+        # ...and the prompt does not imply a single read suffices.
+        assert "LARGER than a single read returns" in prompt
+        assert "One read of that file is NOT the whole diff" in prompt
     finally:
         shutil.rmtree(wt, ignore_errors=True)
 

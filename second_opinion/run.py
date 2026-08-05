@@ -892,7 +892,12 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         if full_diff_rel:
             turn += (f"The COMPLETE diff is in your working directory at "
                      f"`./{full_diff_rel}` (it is not part of the PR — it was placed there "
-                     f"for you). READ IT before you conclude. ")
+                     f"for you). It is LARGER than a single read returns, so the "
+                     f"{len(dropped)} files missing from the excerpt are ordered FIRST in "
+                     f"it: read from the top and you get what the excerpt lacked, then page "
+                     f"onwards (or `grep -n '^diff --git' {full_diff_rel}` to jump to a "
+                     f"specific file). One read of that file is NOT the whole diff — do not "
+                     f"treat it as such. ")
         else:
             # No on-disk copy. The checkout is still there, so the agent can read the
             # current state of the named files — but NOT diff them: the consumer's
@@ -933,9 +938,24 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
             # to write it would be two contradictory warnings, and the optimistic one is the
             # one a reader believes.
             write_err = ""
+            # Dropped files FIRST. pi's read tool returns at most 2000 lines or 50KB,
+            # whichever hits first, and this file is larger than that by construction —
+            # it only exists because the excerpt overflowed. Left in git path order the
+            # agent's first read would hand back the very files the excerpt already
+            # carried, so it could "read the complete diff" and see nothing new: the
+            # original bug, one layer down.
+            ordered = rv.reorder_unseen_first(full_text, dropped)
+            header = (f"# Full diff for PR #{pr} — placed here by second-opinion; NOT part\n"
+                      f"# of the PR. The prompt excerpt carried {len(files)} of "
+                      f"{len(files) + len(dropped)} changed files. The {len(dropped)} it did\n"
+                      f"# NOT carry are ordered FIRST below (smallest first, so one read reaches\n"
+                      f"# as many as possible), so reading from the top gives\n"
+                      f"# you material the excerpt lacked. This file is larger than a single\n"
+                      f"# read returns — page through it, or grep '^diff --git' to locate a\n"
+                      f"# specific file.\n\n")
             try:
                 with open(os.path.join(wt, FULL_DIFF_NAME), "w", encoding="utf-8") as fh:
-                    fh.write(full_text)
+                    fh.write(header + ordered)
             except OSError as e:
                 # Non-fatal: the excerpt still yields a review. But the agent now has no way to
                 # reach the remainder, so clear the pointer (or the prompt sends it to read a
@@ -962,7 +982,7 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
                 f"{'full diff written to ' + FULL_DIFF_NAME if full_diff_rel else 'WRITE FAILED: ' + write_err}")
             _annotate("warning",
                       f"#{pr}: prompt excerpt covers {len(files)} of "
-                      f"{len(files) + len(dropped)} changed files ({pct}% of the filtered diff) "
+                      f"{len(files) + len(dropped)} changed files ({pct}% of the filtered diff by size) "
                       f"— {tail}. Not in the excerpt: {listed}")
         msgs = [user_turn(filtered if i == 0 else rv.shuffle_inputs(filtered, i))
                 for i in range(K)]
