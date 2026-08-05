@@ -705,6 +705,21 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
     return "\n\n---\n\n".join(parts)
 
 
+def _bytes(s: str) -> int:
+    return len(s.encode("utf-8"))
+
+
+def _clip_utf8(s: str, max_bytes: int) -> str:
+    """Truncate to at most `max_bytes` UTF-8 bytes without splitting a character."""
+    if max_bytes <= 0:
+        return ""
+    raw = s.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return s
+    # errors="ignore" drops a trailing partial sequence rather than raising.
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
+
+
 def _clip_review_body(review_body: str, reserved: int, limit: int = COMMENT_MAX) -> str:
     """Trim the review body so the assembled comment fits under GitHub's comment cap.
 
@@ -712,25 +727,33 @@ def _clip_review_body(review_body: str, reserved: int, limit: int = COMMENT_MAX)
     is a worse one, and that is the silent-failure class this reviewer exists to avoid.
     Only the body is clipped — the marker leads the comment and idempotency is a
     `startswith` match, so dedup keeps working — and `reserved` holds room for the header
-    and footer so the cost line survives too."""
+    and footer so the cost line survives too.
+
+    Budgeted in **UTF-8 bytes**, not code points. GitHub documents the cap in
+    "characters" without pinning the unit, and the comment is not ASCII: the header alone
+    carries `🤖`, `—` and `×` (48 code points, 54 bytes), and findings routinely add more
+    emoji. For every string, UTF-8 bytes >= UTF-16 units >= code points, so a body that
+    fits the byte budget fits under all three readings — whereas budgeting by code points
+    would be correct only under the most generous one, with zero slack to absorb being
+    wrong."""
     room = limit - reserved
     notice = "\n\n*(review truncated to fit GitHub's comment size limit — see the run log)*"
     if room <= 0:
         # Pathological: header+footer alone fill the cap. Nothing useful to salvage.
         return ""
-    if len(review_body) <= room:
+    if _bytes(review_body) <= room:
         return review_body
-    keep = room - len(notice)
+    keep = room - _bytes(notice)
     if keep <= 0:
         # `room` too small for even the notice. Unreachable from review_pr (the header and
-        # footer are hundreds of chars against a 65536 cap), but the helper takes a general
+        # footer are hundreds of bytes against a 65536 cap), but the helper takes a general
         # `limit`, so keep it correct in isolation: never return more than `room`.
-        return notice.strip()[:room]
-    log(f"review body {len(review_body)}c exceeds the comment cap — clipping to {keep}c")
+        return _clip_utf8(notice.strip(), room)
+    log(f"review body {_bytes(review_body)}B exceeds the comment cap — clipping to {keep}B")
     _annotate("warning",
               f"review body clipped to fit GitHub's {limit}-char comment limit "
-              f"({len(review_body)}c → {keep}c) — the tail is in the run log/artifacts")
-    return review_body[:keep].rstrip() + notice
+              f"({_bytes(review_body)}B → {keep}B) — the tail is in the run log/artifacts")
+    return _clip_utf8(review_body, keep).rstrip() + notice
 
 
 def _cost_footer(total_cost: float, tokens: int, estimated: bool) -> str:
@@ -916,7 +939,8 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         footer += "\n\n*(diff truncated to fit context — coverage is partial)*"
     marker = MARKER.format(sha=sha)
     shell = HEADER.format(marker=marker, pass_label=pass_label, model=model, body="")
-    review_body = _clip_review_body(review_body, len(shell) + len(footer))
+    # Reserve in bytes, matching _clip_review_body's budget — the shell is not ASCII.
+    review_body = _clip_review_body(review_body, _bytes(shell) + _bytes(footer))
     body = HEADER.format(marker=marker, pass_label=pass_label,
                          model=model, body=review_body) + footer
 

@@ -199,14 +199,46 @@ def test_clip_review_body_preserves_short_bodies_and_marker_position():
     # only ever touches the body — the marker leads the comment and dedup is a startswith.
     assert run._clip_review_body("short", reserved=100) == "short"
     clipped = run._clip_review_body("y" * 5000, reserved=0, limit=1000)
-    assert len(clipped) <= 1000
+    assert len(clipped.encode("utf-8")) <= 1000
     assert clipped.startswith("yyy") and "truncated" in clipped
     # The result must never exceed the room it was given, at any limit — including the
     # window where there isn't even room for the truncation notice, and the degenerate
-    # case where the header/footer alone fill the cap.
-    for limit in range(0, 400, 7):
-        out = run._clip_review_body("z" * 5000, reserved=0, limit=limit)
-        assert len(out) <= max(0, limit), (limit, len(out))
+    # case where the header/footer alone fill the cap. Budget is UTF-8 BYTES, so a
+    # multi-byte body must not sneak over the cap by being short in code points.
+    for body in ("z" * 5000, "🤖" * 2000, "é—×" * 1500):
+        for limit in range(0, 400, 7):
+            out = run._clip_review_body(body, reserved=0, limit=limit)
+            assert len(out.encode("utf-8")) <= max(0, limit), (body[:2], limit, out)
+            out.encode("utf-8").decode("utf-8")  # never splits a character
+
+
+def test_posted_comment_fits_the_cap_in_bytes_not_just_code_points():
+    # The assembled comment is not ASCII — the header alone carries 🤖/—/× — so a
+    # code-point budget would pass here while the real byte length overflowed.
+    import contextlib
+    import io
+    real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
+    run.K = 1
+    real_deps = _stub_review_pr_deps()
+    # Every char is 4 UTF-8 bytes: 40000 code points = 160000 bytes, way over the cap.
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult("🤖" * 40000, "ok")
+    _capture_annotations()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+        assert out.posted is True
+        printed = buf.getvalue()
+        start = printed.index("<!-- second-opinion sha=")
+        comment = printed[start:]
+        assert len(comment.encode("utf-8")) <= run.COMMENT_MAX, len(comment.encode("utf-8"))
+    finally:
+        run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+        run.PROVIDER = real_provider
+        _restore_review_pr_deps(real_deps)
+        run._annotate = _REAL_ANNOTATE
 
 
 def test_merge_reviews_accumulates_cost_across_a_retried_attempt():

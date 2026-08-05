@@ -26,6 +26,13 @@ All notable changes to this project are documented here. The format follows
   and a `::warning`; the marker and cost footer are preserved so idempotency and reporting
   still work. This mattered most on the new unmerged-fallback path, whose body concatenates
   the K raw passes with no dedup and is therefore larger than the merged body would be.
+  The budget is counted in UTF-8 bytes rather than code points: GitHub documents the cap
+  in "characters" without pinning the unit, and the comment is not ASCII, so a byte budget
+  is the only one that holds under every reading.
+- `second-opinion-eval` inherits the merge fallback. Previously a merge flake raised and
+  the eval loop skipped that PR entirely; now it judges the raw passes, which is what
+  production would have posted — so eval measures real behaviour. The eval log gains the
+  fallback's `::warning` line when this happens.
 
 ## [1.3.0] - 2026-08-04
 
