@@ -7,6 +7,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **A per-pass spend ceiling** (`max-pass-tokens`, `max-pass-cost-usd`; env `MAX_PASS_TOKENS`,
+  `MAX_PASS_COST_USD`). `pass-timeout-seconds` bounds *time*, not money: an agent stuck in a
+  tool-call loop burned **12.6M tokens and $1.96 producing nothing**, ended only by the clock,
+  and raising the timeout had merely doubled the worst-case bill. A watchdog now samples the
+  session transcript — where usage is already written per assistant message — and aborts a
+  pass that crosses the ceiling, reporting it as **`runaway`**, its own degraded cause rather
+  than a timeout. **Off by default**: killing a legitimately long pass is its own failure, and
+  one incident is thin evidence for a global default, so each repo opts in with numbers it has.
+- **Degraded annotations now say what the pass spent.** "timed out after 1800s" reads
+  identically for a pass working flat out (2.3M tok), one hung at ~30 tok/s, and one looping
+  at ~7000 tok/s — three failure modes with three different remedies, indistinguishable in the
+  checks UI. Every degraded annotation now carries `N tok · $C`, so a runaway is recognisable
+  without opening the run log. A `runaway` additionally names the spend that tripped the
+  ceiling. If a cost ceiling is set but pricing is unavailable — `PROVIDER=local` never
+  prices, and a failed lookup is deliberately uncached — the run says so rather than
+  silently not protecting, and a non-numeric ceiling disables loudly instead of crashing
+  the process at import.
+
 ### Fixed
 - **`filter_diff` now reports what it did, instead of callers guessing.** It returned
   `(text, files, truncated)` — enough to know an excerpt was capped, never enough to know

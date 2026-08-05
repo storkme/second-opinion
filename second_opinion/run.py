@@ -31,6 +31,8 @@ Env:
   EXCLUDE_GLOBS       comma-separated globs to drop (default: lockfiles/build/images)
   MAX_DIFF_CHARS      diff cap (default 60000)
   PASS_TIMEOUT_S      per-pass timeout (default 1800; the calling job's budget must exceed it)
+  MAX_PASS_TOKENS     abort a pass over this many tokens (default: unset = no ceiling)
+  MAX_PASS_COST_USD   same, in USD (default: unset = no ceiling)
   TOOLS               pi tool grant (default read,bash; set read to drop shell)
   PI_REASONING        whether the model is a reasoning model (default true)
   FAIL_ON_DEGRADED    exit 2 when a degraded pass posts no review (default true; set
@@ -49,6 +51,7 @@ import os
 import re
 import subprocess
 import shutil
+import threading
 import tempfile
 import time
 from pathlib import Path
@@ -80,6 +83,35 @@ MERGE_MODEL = os.environ.get("MERGE_MODEL", "").strip()
 MAX_DIFF_CHARS = int(os.environ.get("MAX_DIFF_CHARS", "").strip() or "60000")
 _pt = os.environ.get("PASS_TIMEOUT_S", "").strip()
 PASS_TIMEOUT_S = int(_pt) if _pt else 1800
+# Spend ceilings, per pass. A wall clock bounds TIME, not money: a looping agent burned
+# 12.6M tokens ($1.96) producing nothing, and raising PASS_TIMEOUT_S only raised the bill.
+# Empty = DISABLED, deliberately: killing a legitimately long pass is its own failure
+# mode, and one incident is thin evidence for a default. Opt in per repo, where you have
+# the numbers. Tokens are the primary lever because they are provider-neutral and always
+# available; cost depends on a pricing lookup that returns None when it fails, which would
+# silently disable a cost-only ceiling.
+# Deferred because _annotate is defined below; main() emits these at startup.
+_CONFIG_ERRORS: list[str] = []
+
+
+def _num_env(name: str, cast, default):
+    """Parse a numeric env knob, or disable it loudly. `max-pass-cost-usd: "$1.96"` and
+    `"1,000"` are natural operator mistakes, and a raw ValueError traceback at import is
+    the opposite of this project's "fail legibly through the degraded machinery" rule."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return cast(raw)
+    except ValueError:
+        _CONFIG_ERRORS.append(f"{name}={raw!r} is not a number — ignoring it, so that "
+                              f"ceiling is INACTIVE for this run")
+        return default
+
+
+MAX_PASS_TOKENS = _num_env("MAX_PASS_TOKENS", int, 0)
+MAX_PASS_COST_USD = _num_env("MAX_PASS_COST_USD", float, 0.0)
+BUDGET_POLL_S = 20
 REPO_DIR = os.environ.get("REPO_DIR", "").strip() or os.getcwd()
 PI_FLAGS = ["--no-extensions", "--no-skills", "--no-themes",
             "--no-prompt-templates"]
@@ -154,6 +186,13 @@ def _annotate(level: str, msg: str) -> None:
     # per actions/toolkit escapeData) or a literal "%25" in pi's stderr renders as "%".
     msg = msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
     print(f"::{level} title=second-opinion::{msg}", flush=True)
+
+
+def _as_text(v) -> str:
+    """Decode a subprocess payload that may be bytes even when text=True was requested."""
+    if isinstance(v, bytes):
+        return v.decode("utf-8", "replace")
+    return v or ""
 
 
 def _peek(out: str | None, limit: int = 200) -> str:
@@ -271,7 +310,7 @@ class PassResult(NamedTuple):
     tokens: int = 0
 
 
-DEGRADED = {"timeout", "error", "empty"}
+DEGRADED = {"timeout", "error", "empty", "runaway"}
 
 
 class ReviewOutcome(NamedTuple):
@@ -434,6 +473,32 @@ def _float_or_zero(value: object) -> float:
     return parsed if math.isfinite(parsed) else 0.0
 
 
+def _accumulate_usage(total: dict, usage) -> None:
+    """Fold one pi `Usage` record into a running total. Shared by the whole-file reader
+    and the watchdog's incremental one so the two cannot drift — pi's schema is camelCase
+    (`cacheRead`/`cacheWrite`/`totalTokens`), normalized to snake_case here."""
+    if not isinstance(usage, dict):
+        return
+    input_tokens = _int_or_zero(usage.get("input"))
+    output_tokens = _int_or_zero(usage.get("output"))
+    cache_read = _int_or_zero(usage.get("cacheRead") or usage.get("cache_read"))
+    cache_write = _int_or_zero(usage.get("cacheWrite") or usage.get("cache_write"))
+    total["input"] += input_tokens
+    total["output"] += output_tokens
+    total["cache_read"] += cache_read
+    total["cache_write"] += cache_write
+    raw_total = usage.get("totalTokens")
+    if raw_total is None:
+        raw_total = usage.get("total_tokens")
+    if raw_total is None:
+        total["total_tokens"] += input_tokens + output_tokens + cache_read + cache_write
+    else:
+        total["total_tokens"] += _int_or_zero(raw_total)
+    cost = usage.get("cost")
+    if isinstance(cost, dict):
+        total["cost_total"] += _float_or_zero(cost.get("total"))
+
+
 def _read_session_usage(session_dir: str, exclude: set = ()) -> dict:
     """Sum real token usage across the pi session JSONL file(s) in a dir, skipping files
     already present before the pass began (so a pass shares a persisted dir without
@@ -459,30 +524,7 @@ def _read_session_usage(session_dir: str, exclude: set = ()) -> dict:
                         if not line:
                             continue
                         entry = json.loads(line)
-                        usage = (entry.get("message") or {}).get("usage")
-                        if not isinstance(usage, dict):
-                            continue
-                        input_tokens = _int_or_zero(usage.get("input"))
-                        output_tokens = _int_or_zero(usage.get("output"))
-                        cache_read = _int_or_zero(usage.get("cacheRead")
-                                                  or usage.get("cache_read"))
-                        cache_write = _int_or_zero(usage.get("cacheWrite")
-                                                   or usage.get("cache_write"))
-                        total["input"] += input_tokens
-                        total["output"] += output_tokens
-                        total["cache_read"] += cache_read
-                        total["cache_write"] += cache_write
-                        raw_total = usage.get("totalTokens")
-                        if raw_total is None:
-                            raw_total = usage.get("total_tokens")
-                        if raw_total is None:
-                            total["total_tokens"] += (input_tokens + output_tokens
-                                                       + cache_read + cache_write)
-                        else:
-                            total["total_tokens"] += _int_or_zero(raw_total)
-                        cost = usage.get("cost")
-                        if isinstance(cost, dict):
-                            total["cost_total"] += _float_or_zero(cost.get("total"))
+                        _accumulate_usage(total, (entry.get("message") or {}).get("usage"))
             except (OSError, ValueError):
                 continue
     return total
@@ -506,6 +548,79 @@ def _finish_pass(model: str, session_dir: str, internal: bool, text: str, status
         # list-price estimate from real token counts.
         cost = _cost_from_usage(model, usage)
     return PassResult(text, status, cost=cost, tokens=tokens)
+
+
+class _UsageTail:
+    """Usage reader that only parses bytes appended since the last poll.
+
+    The watchdog exists to catch a pass producing a multi-MB transcript, so re-reading it
+    from byte 0 every poll would be O(n^2) precisely where it matters — and a parse that
+    outran the poll interval would add detection lag on top. Binary mode because text-mode
+    `tell()` is unusable after line iteration; a trailing partial line is left unconsumed
+    so the next poll sees it whole."""
+
+    def __init__(self, session_dir: str, exclude: set = ()):
+        self.dir = session_dir
+        self.exclude = set(exclude)
+        self.offsets: dict = {}
+        self.total = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
+                      "total_tokens": 0, "cost_total": 0.0}
+
+    def poll(self) -> dict:
+        if not self.dir or not os.path.isdir(self.dir):
+            return dict(self.total)
+        for root, _dirs, files in os.walk(self.dir):
+            for fn in files:
+                fp = os.path.join(root, fn)
+                if not fn.endswith(".jsonl") or fp in self.exclude:
+                    continue
+                try:
+                    with open(fp, "rb") as fh:
+                        fh.seek(self.offsets.get(fp, 0))
+                        raw = fh.read()
+                except OSError:
+                    continue
+                if not raw:
+                    continue
+                consumed = raw.rfind(b"\n") + 1
+                if not consumed:
+                    continue
+                self.offsets[fp] = self.offsets.get(fp, 0) + consumed
+                for line in raw[:consumed].decode("utf-8", "replace").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    _accumulate_usage(self.total, (entry.get("message") or {}).get("usage"))
+        return dict(self.total)
+
+
+def _spend_note(usage: dict, model: str) -> str:
+    """` · N tok · $C` for a degraded annotation. "timed out after 1800s" reads the same
+    for a pass working flat out, one hung at 30 tok/s, and one looping at 7000 tok/s —
+    the spend is what tells them apart, and it is already on disk."""
+    tok = usage.get("total_tokens", 0)
+    cost = usage.get("cost_total", 0.0) or _cost_from_usage(model, usage)
+    if not tok and not cost:
+        return ""
+    bits = f"{tok:,} tok" if tok else ""
+    if cost:
+        bits += f" · ${cost:.4f}" if bits else f"${cost:.4f}"
+    return f" · {bits}"
+
+
+def _budget_breach(usage: dict, model: str) -> str:
+    """Why this pass has blown its spend ceiling, or "" if it hasn't."""
+    tok = usage.get("total_tokens", 0)
+    if MAX_PASS_TOKENS and tok > MAX_PASS_TOKENS:
+        return f"{tok:,} tokens over the {MAX_PASS_TOKENS:,} token ceiling"
+    if MAX_PASS_COST_USD:
+        cost = usage.get("cost_total", 0.0) or _cost_from_usage(model, usage)
+        if cost > MAX_PASS_COST_USD:
+            return f"${cost:.4f} over the ${MAX_PASS_COST_USD:.2f} ceiling"
+    return ""
 
 
 def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
@@ -547,41 +662,137 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
     # the checkout token. Trusting PR authors is the real boundary; see README Security.)
     env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
     prior_files = _list_session_files(session_dir)
+    proc = None
     try:
+        # Popen rather than subprocess.run so a watchdog can watch the pass WHILE it runs.
+        # The watchdog is a thread, not a communicate() poll loop: communicate() accepts
+        # its input exactly once and the oversized-prompt path pipes the diff through
+        # stdin, so re-entering it after a timeout would be ill-defined. The thread only
+        # observes and kills; the normal call below is unchanged.
+        proc = subprocess.Popen(
+            cmd, cwd=wt, env=env, text=True,
+            stdin=subprocess.PIPE if stdin_input is not None else None,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        breach = {"why": ""}
+        stop = threading.Event()
+        tail = _UsageTail(session_dir, prior_files)
+
+        def _watch() -> None:
+            while not stop.wait(BUDGET_POLL_S):
+                try:
+                    why = _budget_breach(tail.poll(), model)
+                except Exception:  # noqa: BLE001 — a transient read must not kill a pass
+                    continue
+                if why and proc.poll() is None:
+                    # Guard on "still running": a pass that finished naturally can have
+                    # final usage above the ceiling, and setting breach then would discard
+                    # a perfectly good review. kill() is a no-op on a reaped process, so
+                    # without this the flag alone would misreport it as a runaway.
+                    breach["why"] = why
+                    proc.kill()
+                    return
+
+        if MAX_PASS_COST_USD and not MAX_PASS_TOKENS and _model_prices(model) is None:
+            # Careful with the claim: the ceiling reads pi's own usage.cost.total FIRST and
+            # only falls back to a list-price estimate, so a missing lookup does not prove
+            # the ceiling is dead — on a --watch daemon a transient /v1/models blip would
+            # otherwise cry INACTIVE at a pass that is genuinely protected. Say what is
+            # actually known: the fallback is gone, so the ceiling now depends entirely on
+            # pi pricing this model itself.
+            _annotate("warning",
+                      f"cost ceiling AT RISK: no list pricing for {model}, so "
+                      f"MAX_PASS_COST_USD can only trip if pi prices the model itself — "
+                      f"if it does not, this pass is bounded only by the clock. "
+                      f"MAX_PASS_TOKENS needs no pricing and is the reliable lever.")
+        if MAX_PASS_TOKENS or MAX_PASS_COST_USD:
+            threading.Thread(target=_watch, daemon=True).start()
         try:
             # input=None keeps today's inherited-stdin behavior for the inline path;
             # a str pipes it (non-TTY), which pi reads as the verbatim initial prompt.
-            p = subprocess.run(cmd, cwd=wt, capture_output=True, text=True,
-                               timeout=PASS_TIMEOUT_S, env=env, input=stdin_input)
+            out, err = proc.communicate(input=stdin_input, timeout=PASS_TIMEOUT_S)
         except subprocess.TimeoutExpired as e:
+            proc.kill()
+            try:
+                out, err = proc.communicate()
+            except Exception:  # noqa: BLE001
+                # TimeoutExpired carries BYTES on POSIX even under text=True, and _peek
+                # does " ".join(x.split()) — bytes there is a TypeError that would crash
+                # the pass instead of returning a clean degraded "timeout".
+                out, err = _as_text(e.output), _as_text(e.stderr)
             # The exception carries the partial output captured before the kill (stdout in
             # `output`, stderr in `stderr`) — surface it so a blocked pass is diagnosable
             # from the log, not a silent black box.
-            tail = _peek(e.stderr or e.output or "")
-            note = f" — partial output: {tail}" if tail else ""
-            log(f"pi pass timed out after {PASS_TIMEOUT_S}s{note}")
-            _annotate("warning", f"pi pass timed out after {PASS_TIMEOUT_S}s — no review produced{note}")
+            # NOT `tail`: that name is the _UsageTail the watchdog closure captures,
+            # and rebinding it to a string would leave a future reordering with a
+            # watchdog that silently stops working.
+            peek = _peek(err or out or "")
+            note = f" — partial output: {peek}" if peek else ""
+            spend = _spend_note(_read_session_usage(session_dir, exclude=prior_files), model)
+            log(f"pi pass timed out after {PASS_TIMEOUT_S}s{spend}{note}")
+            _annotate("warning",
+                      f"pi pass timed out after {PASS_TIMEOUT_S}s{spend} — no review produced{note}")
             return _finish_pass(model, session_dir, internal, "", "timeout", prior_files)
-        if p.returncode != 0:
+        finally:
+            stop.set()
+        # Belt and braces with the watchdog's poll() guard: classify as runaway only if
+        # the process really was killed (negative returncode), never if it exited on its
+        # own between the last poll and communicate() returning.
+        if breach["why"] and (proc.returncode or 0) < 0:
+            # Killed for spend, not time. Reported as its own cause so the three failure
+            # modes stop being indistinguishable in the checks UI.
+            # Only promise evidence that will actually exist. With no session-dir
+            # configured, internal=True and _finish_pass deletes the throwaway transcript
+            # a line later — pointing the operator at it would recreate the #29 failure
+            # this feature exists to fix ("the numbers survived, the evidence did not"),
+            # for every consumer who sets a ceiling without also setting session-dir.
+            evidence = ("see the retained session transcript for what it was looping on"
+                        if not internal else
+                        "no transcript was retained — set `session-dir` to capture what "
+                        "it loops on next time")
+            spend = _spend_note(_read_session_usage(session_dir, exclude=prior_files), model)
+            log(f"pi pass aborted — {breach['why']}")
+            _annotate("warning",
+                      f"pi pass aborted: {breach['why']}{spend} — no review produced. "
+                      f"A longer timeout would only raise the bill; {evidence}.")
+            return _finish_pass(model, session_dir, internal, "", "runaway", prior_files)
+        if proc.returncode != 0:
             # Surface the failure (bad key, 402 out-of-credits, unknown model id, server
             # 4xx/OOM) instead of leaving only a "0c" line. Partial stdout from a crash isn't
             # trustworthy. The annotation carries WHY (e.g. the 402 message) to the operator.
-            detail = " ".join((p.stderr or p.stdout or "").split())[:200]
-            log(f"pi pass exited {p.returncode}: {detail}")
-            _annotate("error", f"pi exited {p.returncode} — {detail[:150]}")
+            detail = " ".join((err or out or "").split())[:200]
+            spend = _spend_note(_read_session_usage(session_dir, exclude=prior_files), model)
+            log(f"pi pass exited {proc.returncode}{spend}: {detail}")
+            _annotate("error", f"pi exited {proc.returncode}{spend} — {detail[:150]}")
             return _finish_pass(model, session_dir, internal, "", "error", prior_files)
-        text = (p.stdout or "").strip()
+        text = (out or "").strip()
         if not text:
             # Exit 0 with nothing to say: the model returned no review at all. Treat as a
             # degraded pass, not a clean bill of health. A silent pass can still carry a tale
             # in stderr (a provider warning, an empty assistant message pi relayed) — surface
             # it so the failure isn't a black box.
-            note = f" — stderr: {_peek(p.stderr)}" if (p.stderr or "").strip() else ""
-            log(f"pi pass exited 0 but produced no review output{note}")
-            _annotate("warning", f"pass completed but produced no review output{note}")
+            note = f" — stderr: {_peek(err)}" if (err or "").strip() else ""
+            spend = _spend_note(_read_session_usage(session_dir, exclude=prior_files), model)
+            log(f"pi pass exited 0 but produced no review output{spend}{note}")
+            _annotate("warning",
+                      f"pass completed but produced no review output{spend}{note}")
             return _finish_pass(model, session_dir, internal, "", "empty", prior_files)
         return _finish_pass(model, session_dir, internal, text, "ok", prior_files)
     finally:
+        # subprocess.run wrapped its Popen in a `with` and killed the child on ANY
+        # exception; a raw Popen does not, and that regression is worse here than
+        # elsewhere: the inner `finally: stop.set()` has already retired the watchdog by
+        # the time an exception reaches this point, so an orphaned pi would keep burning
+        # tokens with no ceiling at all — the exact failure this feature exists to bound.
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                pass
+            try:
+                proc.wait(timeout=10)   # reap, so no zombie is left behind
+            except Exception:  # noqa: BLE001
+                pass
         # Safety net for the paths _finish_pass never reaches. Redaction lives ONLY
         # in _finish_pass, which every normal return goes through — but an exception
         # escaping this function (a UnicodeDecodeError out of text=True on non-UTF-8
@@ -1161,6 +1372,13 @@ def sweep(args: argparse.Namespace) -> bool:
     merge_desc = f"{MERGE_PROVIDER}:{merge_model}" if K > 1 else "n/a (K=1)"
     log(f"second opinion · provider={PROVIDER} · model={model} · K={K} · merge={merge_desc} "
         f"· {len(targets)} candidate PR(s)")
+    while _CONFIG_ERRORS:
+        # Drained, not iterated: main() runs once per sweep under --watch, and a mistyped
+        # ceiling should not annotate red on every tick for the daemon's lifetime.
+        # Surfaced here rather than at import because _annotate is defined below.
+        problem = _CONFIG_ERRORS.pop(0)
+        log(f"config: {problem}")
+        _annotate("error", f"config: {problem}")
     silent_failure = False
     for t in targets:
         n, sha, title = t["number"], t["headRefOid"], t["title"]

@@ -59,6 +59,20 @@ inputs:
       timeout."
     required: false
     default: "1800"
+  max-pass-tokens:
+    description: "Abort a pass once it exceeds this many tokens, reported as `runaway`
+      rather than a timeout. A wall clock bounds time, not money — a looping agent can
+      burn millions of tokens producing nothing, and a longer timeout only raises the
+      bill. Empty (default) disables the ceiling."
+    required: false
+    default: ""
+  max-pass-cost-usd:
+    description: "Same, in USD. Prefer max-pass-tokens as the primary guard: this one
+      depends on a price lookup, and a persistently failing lookup is deliberately left
+      uncached (so a daemon retries), which means a cost-only ceiling degrades to a no-op
+      while stalling each poll on the fetch. Empty (default) disables it."
+    required: false
+    default: ""
   session-dir:
     description: "Directory where pi writes its JSONL session transcripts. When set, each
       pass's full agent transcript is saved there (instead of pi's ephemeral --no-session
@@ -104,6 +118,8 @@ runs:
     MAX_DIFF_CHARS: ${{ inputs.max-diff-chars }}
     PI_MAX_TOKENS: ${{ inputs.max-tokens }}
     PASS_TIMEOUT_S: ${{ inputs.pass-timeout-seconds }}
+    MAX_PASS_TOKENS: ${{ inputs.max-pass-tokens }}
+    MAX_PASS_COST_USD: ${{ inputs.max-pass-cost-usd }}
     PI_SESSION_DIR: ${{ inputs.session-dir }}
     TOOLS: ${{ inputs.tools }}
     PI_REASONING: ${{ inputs.reasoning }}

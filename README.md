@@ -63,6 +63,8 @@ See [`examples/second-opinion.yml`](examples/second-opinion.yml) for the fuller 
 | `exclude-globs` | sensible set | comma-separated globs dropped from the diff |
 | `max-diff-chars` | `60000` | diff size cap |
 | `max-tokens` | *(provider-aware)* | max completion tokens per pass. Empty = `65536` OpenRouter (deepseek-v4-flash-0731's cap) / `32768` local. A reasoning model can exhaust a smaller budget in its reasoning channel and return an empty 200. |
+| `max-pass-tokens` | — (off) | abort a pass over this many tokens, reported as `runaway` not `timeout`. A clock bounds time, not spend: a looping agent burns tokens producing nothing and a longer timeout only raises the bill. |
+| `max-pass-cost-usd` | — (off) | same, in USD. Depends on a price lookup that can fail — prefer `max-pass-tokens`. |
 | `pass-timeout-seconds` | `1800` | per-pass timeout. Keep the job's `timeout-minutes` comfortably above it — a job cap firing mid-pass skips the degraded report entirely. |
 | `session-dir` | — | when set, pi writes each pass's JSONL session transcript here (instead of ephemeral `--no-session`). Point it at a path you persist — e.g. upload as an artifact — to replay a blocked/empty pass. |
 | `tools` | `read,bash` | agent tool grant; set `read` to drop shell (see Security) |
