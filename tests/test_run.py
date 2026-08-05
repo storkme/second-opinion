@@ -565,6 +565,14 @@ def test_single_file_clipped_mid_hunk_is_not_described_as_full_coverage():
         cov = [m for lvl, m in ann if lvl == "warning" and "excerpt" in m]
         assert cov and "cuts the last one off mid-file" in cov[0], cov
         assert "Not in the excerpt:" not in cov[0], cov[0]
+        # The file's own header must agree with all of the above. With nothing dropped
+        # the reorder is a no-op, so the TOP repeats the excerpt and the missing material
+        # is the TAIL — pointing the agent at the top would be actively wrong.
+        head = open(os.path.join(wt, run.FULL_DIFF_NAME), encoding="utf-8").read()[:700]
+        assert "the material you are missing is the TAIL" in head, head
+        assert "Page DOWN" in head, head
+        assert "ordered FIRST" not in head, head
+        assert "1 of 1 changed files" not in head, head
     finally:
         shutil.rmtree(wt, ignore_errors=True)
 

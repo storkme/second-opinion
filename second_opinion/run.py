@@ -960,14 +960,26 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
             # carried, so it could "read the complete diff" and see nothing new: the
             # original bug, one layer down.
             ordered = rv.reorder_unseen_first(full_text, dropped)
-            header = (f"# Full diff for PR #{pr} — placed here by second-opinion; NOT part\n"
-                      f"# of the PR. The prompt excerpt carried {len(files)} of "
-                      f"{len(files) + len(dropped)} changed files. The {len(dropped)} it did\n"
-                      f"# NOT carry are ordered FIRST below (smallest first, so one read reaches\n"
-                      f"# as many as possible), so reading from the top gives\n"
-                      f"# you material the excerpt lacked. This file is larger than a single\n"
-                      f"# read returns — page through it, or grep '^diff --git' to locate a\n"
-                      f"# specific file.\n\n")
+            # Branch the header exactly as the prompt/annotation/footer do. With `dropped`
+            # empty, reorder_unseen_first is a no-op, so the top of this file is the same
+            # clipped head the excerpt already carried and the missing material is the
+            # TAIL. Telling the agent to read the top would be worse than saying nothing:
+            # it would see familiar content, believe it had caught up, and never page down.
+            head = (f"# Full diff for PR #{pr} — placed here by second-opinion; NOT part of\n"
+                    f"# the PR. This file is larger than a single read returns.\n")
+            if dropped:
+                header = (head +
+                          f"# The prompt excerpt carried {len(files)} of "
+                          f"{len(files) + len(dropped)} changed files. The {len(dropped)} it\n"
+                          f"# did NOT carry are ordered FIRST below (smallest first, so one\n"
+                          f"# read reaches as many as possible): reading from the TOP gives\n"
+                          f"# you material the excerpt lacked, then page onwards.\n\n")
+            else:
+                header = (head +
+                          f"# The excerpt carried every changed file, but cut the last one\n"
+                          f"# off mid-file. Order here is unchanged, so the TOP repeats what\n"
+                          f"# you already saw — the material you are missing is the TAIL.\n"
+                          f"# Page DOWN to the end to reach it.\n\n")
             try:
                 with open(os.path.join(wt, FULL_DIFF_NAME), "w", encoding="utf-8") as fh:
                     fh.write(header + ordered)
