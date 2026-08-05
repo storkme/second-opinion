@@ -466,6 +466,10 @@ def test_runaway_pass_is_killed_at_the_token_ceiling():
         msg = " ".join(m for _l, m in ann)
         assert "ceiling" in msg and "4,500" in msg, msg   # names the spend that tripped it
         assert "timed out" not in msg, "a runaway must not report as a timeout"
+        # PI_SESSION_DIR is set here, so the transcript survives and may be pointed at.
+        assert "retained session transcript" in msg, msg
+
+
     finally:
         run.subprocess.run, run.subprocess.Popen = real_run, real_popen
         run.BUDGET_POLL_S = real_poll
@@ -474,6 +478,55 @@ def test_runaway_pass_is_killed_at_the_token_ceiling():
         os.environ.pop("PI_SESSION_DIR", None)
         run._annotate = _REAL_ANNOTATE
         shutil.rmtree(session, ignore_errors=True)
+
+
+def test_runaway_does_not_promise_a_transcript_it_is_about_to_delete():
+    # With no session-dir configured (the default), _finish_pass rmtree's the throwaway
+    # session a line after the annotation. Telling the operator to go read it would be
+    # the #29 failure — "the numbers survived, the evidence did not" — rebuilt.
+    saved = _spend_env(MAX_PASS_TOKENS=1000, MAX_PASS_COST_USD=0.0)
+    real_popen, real_poll = run.subprocess.Popen, run.BUDGET_POLL_S
+    run.BUDGET_POLL_S = 0.05
+    os.environ.pop("PI_SESSION_DIR", None)          # the default: no persistence
+    killed = {"n": 0}
+
+    class FakePopen:
+        returncode = -9
+
+        def __init__(self, cmd, **k):
+            sd = cmd[cmd.index("--session-dir") + 1]
+            os.makedirs(sd, exist_ok=True)
+            with open(os.path.join(sd, "r.jsonl"), "w") as fh:
+                for _ in range(5):
+                    fh.write('{"message":{"usage":{"totalTokens":900,"input":900}}}\n')
+
+        def poll(self):
+            return None if not killed["n"] else -9
+
+        def communicate(self, input=None, timeout=None):
+            import time
+            for _ in range(200):
+                if killed["n"]:
+                    return ("", "")
+                time.sleep(0.02)
+            raise AssertionError("watchdog never killed the runaway")
+
+        def kill(self):
+            killed["n"] += 1
+
+    run.subprocess.Popen = FakePopen
+    ann = _capture_annotations()
+    try:
+        res = run.run_pass("/wt", "m", "sys", "usr")
+        assert res.status == "runaway", res
+        msg = " ".join(m for _l, m in ann)
+        assert "no transcript was retained" in msg, msg
+        assert "set `session-dir`" in msg, msg
+    finally:
+        run.subprocess.Popen, run.BUDGET_POLL_S = real_popen, real_poll
+        for k, v in saved.items():
+            setattr(run, k, v)
+        run._annotate = _REAL_ANNOTATE
 
 
 def test_a_pass_that_finishes_over_the_ceiling_keeps_its_review():

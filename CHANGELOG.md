@@ -16,6 +16,11 @@ All notable changes to this project are documented here. The format follows
   pass that crosses the ceiling, reporting it as **`runaway`**, its own degraded cause rather
   than a timeout. **Off by default**: killing a legitimately long pass is its own failure, and
   one incident is thin evidence for a global default, so each repo opts in with numbers it has.
+- **Degraded annotations now say what the pass spent.** "timed out after 1800s" reads
+  identically for a pass working flat out (2.3M tok), one hung at ~30 tok/s, and one looping
+  at ~7000 tok/s — three failure modes with three different remedies, indistinguishable in the
+  checks UI. Every degraded annotation now carries `N tok · $C`, so a runaway is recognisable
+  without opening the run log.
 
 ### Fixed
 - **`filter_diff` now reports what it did, instead of callers guessing.** It returned
@@ -42,12 +47,6 @@ All notable changes to this project are documented here. The format follows
   callers now share `truncation_notice()` / `write_full_diff()` / `coverage_phrase()`, so
   they cannot drift again.
 
-
-- **Degraded annotations now say what the pass spent.** "timed out after 1800s" reads
-  identically for a pass working flat out (2.3M tok), one hung at ~30 tok/s, and one looping
-  at ~7000 tok/s — three failure modes with three different remedies, indistinguishable in the
-  checks UI. Every degraded annotation now carries `N tok · $C`, so a runaway is recognisable
-  without opening the run log.
 
 ## [1.5.0] - 2026-08-05
 

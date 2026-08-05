@@ -682,8 +682,11 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
             # The exception carries the partial output captured before the kill (stdout in
             # `output`, stderr in `stderr`) — surface it so a blocked pass is diagnosable
             # from the log, not a silent black box.
-            tail = _peek(err or out or "")
-            note = f" — partial output: {tail}" if tail else ""
+            # NOT `tail`: that name is the _UsageTail the watchdog closure captures,
+            # and rebinding it to a string would leave a future reordering with a
+            # watchdog that silently stops working.
+            peek = _peek(err or out or "")
+            note = f" — partial output: {peek}" if peek else ""
             spend = _spend_note(_read_session_usage(session_dir, exclude=prior_files), model)
             log(f"pi pass timed out after {PASS_TIMEOUT_S}s{spend}{note}")
             _annotate("warning",
@@ -697,11 +700,19 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
         if breach["why"] and (proc.returncode or 0) < 0:
             # Killed for spend, not time. Reported as its own cause so the three failure
             # modes stop being indistinguishable in the checks UI.
+            # Only promise evidence that will actually exist. With no session-dir
+            # configured, internal=True and _finish_pass deletes the throwaway transcript
+            # a line later — pointing the operator at it would recreate the #29 failure
+            # this feature exists to fix ("the numbers survived, the evidence did not"),
+            # for every consumer who sets a ceiling without also setting session-dir.
+            evidence = ("see the retained session transcript for what it was looping on"
+                        if not internal else
+                        "no transcript was retained — set `session-dir` to capture what "
+                        "it loops on next time")
             log(f"pi pass aborted — {breach['why']}")
             _annotate("warning",
                       f"pi pass aborted: {breach['why']} — no review produced. "
-                      f"A longer timeout would only raise the bill; see the transcript "
-                      f"artifact for what it was looping on.")
+                      f"A longer timeout would only raise the bill; {evidence}.")
             return _finish_pass(model, session_dir, internal, "", "runaway", prior_files)
         if proc.returncode != 0:
             # Surface the failure (bad key, 402 out-of-credits, unknown model id, server
