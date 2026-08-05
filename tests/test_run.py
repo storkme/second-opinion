@@ -267,6 +267,29 @@ def test_merge_reviews_accumulates_cost_across_a_retried_attempt():
     assert meta["reasoning_tokens"] == 1800, meta
 
 
+def _stub_pi(fn):
+    """Adapt an old-style `subprocess.run` stub to Popen.
+
+    Production uses Popen so the spend watchdog can observe a pass while it runs; these
+    tests were written against subprocess.run and assert the same things (argv, stdin,
+    return codes, raised exceptions), so adapt rather than fork either side."""
+    class _P:
+        def __init__(self, cmd, **kw):
+            self._cmd, self._kw = cmd, kw
+            self.returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            res = fn(self._cmd, input=input, timeout=timeout, **self._kw)
+            self.returncode = res.returncode
+            return (res.stdout, res.stderr)
+
+        def kill(self):
+            pass
+
+    run.subprocess.Popen = _P
+    return _P
+
+
 def _capture_annotations():
     calls = []
     run._annotate = lambda level, msg: calls.append((level, msg))
@@ -274,7 +297,7 @@ def _capture_annotations():
 
 
 def test_run_pass_ok_returns_text_and_status():
-    run.subprocess.run = lambda *a, **k: FakeProc(0, stdout="  real findings  ")
+    _stub_pi(lambda *a, **k: FakeProc(0, stdout="  real findings  "))
     ann = _capture_annotations()
     res = run.run_pass("/wt", "m", "sys", "usr")
     assert res.status == "ok" and res.text == "real findings"
@@ -286,7 +309,7 @@ def test_run_pass_timeout_is_degraded_and_warns():
     def boom(*a, **k):
         raise run.subprocess.TimeoutExpired(cmd="pi", timeout=run.PASS_TIMEOUT_S)
 
-    run.subprocess.run = boom
+    _stub_pi(boom)
     ann = _capture_annotations()
     res = run.run_pass("/wt", "m", "sys", "usr")
     assert res.status == "timeout" and res.text == "" and res.status in run.DEGRADED
@@ -304,7 +327,7 @@ def test_run_pass_timeout_surfaces_partial_output():
             stderr="some stderr tail",
         )
 
-    run.subprocess.run = boom
+    _stub_pi(boom)
     ann = _capture_annotations()
     res = run.run_pass("/wt", "m", "sys", "usr")
     assert res.status == "timeout"
@@ -315,7 +338,7 @@ def test_run_pass_timeout_surfaces_partial_output():
 def test_run_pass_nonzero_exit_surfaces_stderr_verbatim():
     # The 402 out-of-credits message must reach the operator via the error annotation.
     msg = "402 This request requires more credits, or fewer max_tokens"
-    run.subprocess.run = lambda *a, **k: FakeProc(1, stderr=msg + "\n")
+    _stub_pi(lambda *a, **k: FakeProc(1, stderr=msg + "\n"))
     ann = _capture_annotations()
     res = run.run_pass("/wt", "m", "sys", "usr")
     assert res.status == "error" and res.text == "" and res.status in run.DEGRADED
@@ -323,7 +346,7 @@ def test_run_pass_nonzero_exit_surfaces_stderr_verbatim():
 
 
 def test_run_pass_empty_clean_exit_is_degraded():
-    run.subprocess.run = lambda *a, **k: FakeProc(0, stdout="   \n  ")
+    _stub_pi(lambda *a, **k: FakeProc(0, stdout="   \n  "))
     ann = _capture_annotations()
     res = run.run_pass("/wt", "m", "sys", "usr")
     assert res.status == "empty" and res.text == "" and res.status in run.DEGRADED
@@ -333,9 +356,8 @@ def test_run_pass_empty_clean_exit_is_degraded():
 def test_run_pass_empty_surfaces_stderr_for_diagnosis():
     # A silent exit-0 pass can still carry a tale in stderr (a provider warning / empty
     # assistant message pi relayed) — it must reach the annotation, not vanish inline.
-    run.subprocess.run = lambda *a, **k: FakeProc(
-        0, stdout="", stderr="upstream returned empty completion\n"
-    )
+    _stub_pi(lambda *a, **k: FakeProc(
+        0, stdout="", stderr="upstream returned empty completion\n"))
     ann = _capture_annotations()
     res = run.run_pass("/wt", "m", "sys", "usr")
     assert res.status == "empty"
@@ -363,7 +385,7 @@ def test_transcript_is_redacted_even_when_the_pass_raises():
                 fh.write('{"message":{"content":"the key is ' + key + '"}}\n')
             raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad stderr byte")
 
-        run.subprocess.run = writes_then_explodes
+        _stub_pi(writes_then_explodes)
         try:
             run.run_pass("/wt", "m", "sys", "usr")
         except UnicodeDecodeError:
@@ -382,6 +404,137 @@ def test_transcript_is_redacted_even_when_the_pass_raises():
             os.environ.pop("OPENROUTER_API_KEY", None)
         else:
             os.environ["OPENROUTER_API_KEY"] = real_env
+        shutil.rmtree(session, ignore_errors=True)
+
+
+def _spend_env(**kw):
+    """Set spend-ceiling env vars and re-derive run.py's module-level constants."""
+    saved = {k: getattr(run, k) for k in ("MAX_PASS_TOKENS", "MAX_PASS_COST_USD")}
+    for k, v in kw.items():
+        setattr(run, k, v)
+    return saved
+
+
+def test_runaway_pass_is_killed_at_the_token_ceiling():
+    # A wall clock bounds TIME, not money. The observed runaway burned 12.6M tokens and
+    # $1.96 producing nothing, and doubling the timeout only doubled the bill. The
+    # ceiling has to be measured in spend, and it must report as its own cause — not as
+    # a timeout, which is what made the three failure modes indistinguishable.
+    import shutil
+    saved = _spend_env(MAX_PASS_TOKENS=1000, MAX_PASS_COST_USD=0.0)
+    real_run, real_popen = run.subprocess.run, run.subprocess.Popen
+    real_poll = run.BUDGET_POLL_S
+    run.BUDGET_POLL_S = 0.05
+    session = tempfile.mkdtemp(prefix="so-runaway-")
+    os.environ["PI_SESSION_DIR"] = session
+    killed = {"n": 0}
+
+    class FakePopen:
+        returncode = -9
+
+        def __init__(self, cmd, **k):
+            sd = cmd[cmd.index("--session-dir") + 1]
+            os.makedirs(sd, exist_ok=True)
+            # Burn well past the ceiling, as a looping agent would.
+            with open(os.path.join(sd, "runaway.jsonl"), "w") as fh:
+                for _ in range(5):
+                    fh.write('{"message":{"usage":{"totalTokens":900,"input":900}}}\n')
+
+        def communicate(self, input=None, timeout=None):
+            import time
+            for _ in range(200):           # outlive the watchdog, never the test
+                if killed["n"]:
+                    return ("", "")
+                time.sleep(0.02)
+            raise AssertionError("watchdog never killed the runaway")
+
+        def kill(self):
+            killed["n"] += 1
+
+    run.subprocess.Popen = FakePopen
+    ann = _capture_annotations()
+    try:
+        res = run.run_pass("/wt", "m", "sys", "usr")
+        assert res.status == "runaway", res
+        assert res.status in run.DEGRADED
+        assert killed["n"] >= 1, "process was never killed"
+        msg = " ".join(m for _l, m in ann)
+        assert "ceiling" in msg and "4,500" in msg, msg   # names the spend that tripped it
+        assert "timed out" not in msg, "a runaway must not report as a timeout"
+    finally:
+        run.subprocess.run, run.subprocess.Popen = real_run, real_popen
+        run.BUDGET_POLL_S = real_poll
+        for k, v in saved.items():
+            setattr(run, k, v)
+        os.environ.pop("PI_SESSION_DIR", None)
+        run._annotate = _REAL_ANNOTATE
+        shutil.rmtree(session, ignore_errors=True)
+
+
+def test_no_ceiling_configured_means_no_watchdog():
+    # Opt-in: with no ceiling set, behaviour must be byte-identical to before — killing a
+    # legitimately long pass is its own failure, and one incident is thin evidence.
+    saved = _spend_env(MAX_PASS_TOKENS=0, MAX_PASS_COST_USD=0.0)
+    real_popen = run.subprocess.Popen
+    seen = {"killed": False}
+
+    class FakePopen:
+        returncode = 0
+
+        def __init__(self, cmd, **k):
+            pass
+
+        def communicate(self, input=None, timeout=None):
+            return ("a finding", "")
+
+        def kill(self):
+            seen["killed"] = True
+
+    run.subprocess.Popen = FakePopen
+    try:
+        res = run.run_pass("/wt", "m", "sys", "usr")
+        assert res.status == "ok" and res.text == "a finding", res
+        assert not seen["killed"], "no ceiling configured — nothing should be killed"
+    finally:
+        run.subprocess.Popen = real_popen
+        for k, v in saved.items():
+            setattr(run, k, v)
+
+
+def test_degraded_annotations_report_what_the_pass_spent():
+    # "timed out after 1800s" is true and useless: it reads the same for a pass that was
+    # working flat out, one that was hung at 30 tok/s, and one looping at 7000 tok/s.
+    import shutil
+    session = tempfile.mkdtemp(prefix="so-spend-")
+    os.environ["PI_SESSION_DIR"] = session
+    real_popen = run.subprocess.Popen
+
+    class FakePopen:
+        returncode = 0
+
+        def __init__(self, cmd, **k):
+            sd = cmd[cmd.index("--session-dir") + 1]
+            os.makedirs(sd, exist_ok=True)
+            with open(os.path.join(sd, "s.jsonl"), "w") as fh:
+                fh.write('{"message":{"usage":{"totalTokens":123456,"input":123456}}}\n')
+
+        def communicate(self, input=None, timeout=None):
+            return ("   ", "")           # exit 0, no output -> degraded "empty"
+
+        def kill(self):
+            pass
+
+    run.subprocess.Popen = FakePopen
+    ann = _capture_annotations()
+    try:
+        res = run.run_pass("/wt", "m", "sys", "usr")
+        assert res.status == "empty"
+        msg = " ".join(m for _l, m in ann)
+        assert "123,456 tok" in msg, msg
+    finally:
+        run.subprocess.Popen = real_popen
+        os.environ.pop("PI_SESSION_DIR", None)
+        run._annotate = _REAL_ANNOTATE
         shutil.rmtree(session, ignore_errors=True)
 
 
@@ -876,7 +1029,7 @@ def test_run_pass_small_prompt_stays_inline_argv():
         captured["input"] = k.get("input")
         return FakeProc(0, stdout="ok")
 
-    run.subprocess.run = capture
+    _stub_pi(capture)
     res = run.run_pass("/wt", "m", "sys", "small prompt")
     assert res.status == "ok"
     assert captured["cmd"][-2:] == ["-p", "small prompt"]
@@ -898,7 +1051,7 @@ def test_run_pass_oversized_prompt_goes_via_stdin_verbatim():
         captured["input"] = k.get("input")
         return FakeProc(0, stdout="ok")
 
-    run.subprocess.run = capture
+    _stub_pi(capture)
     res = run.run_pass("/wt", "m", "sys", big)
     assert res.status == "ok"
     assert captured["cmd"][-1] == "-p", "oversized prompt must not ride argv"
@@ -917,7 +1070,7 @@ def test_run_pass_oversized_system_prompt_fails_legibly_not_e2big():
         called["run"] = True
         return FakeProc(0, stdout="ok")
 
-    run.subprocess.run = no_run
+    _stub_pi(no_run)
     ann = _capture_annotations()
     big_sys = "g" * (run.PROMPT_ARG_MAX + 1)
     res = run.run_pass("/wt", "m", big_sys, "usr")
@@ -935,7 +1088,7 @@ def test_run_pass_session_dir_targets_dir_and_drops_no_session():
         seen["cmd"] = cmd
         return FakeProc(0, stdout="review ok")
 
-    run.subprocess.run = fake_run
+    _stub_pi(fake_run)
     prev = os.environ.get("PI_SESSION_DIR")
     os.environ["PI_SESSION_DIR"] = "/tmp/so-test-sess"
     try:
@@ -975,7 +1128,7 @@ def test_run_pass_relative_session_dir_is_shared_with_worktree_process():
                         '"totalTokens":15,"cost":{"total":0.01}}}}\n')
             return FakeProc(0, stdout="review ok")
 
-        run.subprocess.run = fake_run
+        _stub_pi(fake_run)
         os.chdir(parent)
         os.environ["PI_SESSION_DIR"] = "relative-sessions"
         try:
@@ -1004,7 +1157,7 @@ def test_run_pass_default_captures_throwaway_session():
         seen["cmd"] = cmd
         return FakeProc(0, stdout="review ok")
 
-    run.subprocess.run = fake_run
+    _stub_pi(fake_run)
     prev = os.environ.get("PI_SESSION_DIR")
     os.environ.pop("PI_SESSION_DIR", None)
     try:
@@ -1166,7 +1319,7 @@ def test_run_pass_uses_provided_session_dir():
         seen["cmd"] = cmd
         return FakeProc(0, stdout="review ok")
 
-    run.subprocess.run = fake_run
+    _stub_pi(fake_run)
     d = tempfile.mkdtemp(prefix="so-provided-session-")
     res = run.run_pass("/wt", "m", "sys", "usr", session_dir=d)
     assert res.status == "ok"

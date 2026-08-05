@@ -54,6 +54,11 @@ jobs:
           # If this trips again, the lever is the diff/prompt size or the model, not
           # another timeout bump.
           pass-timeout-seconds: "1800"
+          # Spend ceiling, opt-in per repo because the right number is local. Observed
+          # here: legitimate reviews run 196K-2.5M tokens; the #29 runaway burned 12.6M
+          # for $1.96 and produced nothing, bounded only by the clock. 5M clears the
+          # worst legitimate run by 2x and still catches that at ~40% of its burn.
+          max-pass-tokens: "5000000"
           # Keep the per-pass transcripts so a degraded pass is diagnosable after the
           # fact. Without this the session goes to a throwaway dir, gets read for the
           # cost footer, and is deleted — which is exactly what happened to the #29
