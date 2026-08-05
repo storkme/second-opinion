@@ -5,6 +5,33 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Fixed
+- **`filter_diff` now reports what it did, instead of callers guessing.** It returned
+  `(text, files, truncated)` — enough to know an excerpt was capped, never enough to know
+  *how*: which chunks vanished, whether the last kept one was cut mid-hunk, or whether a
+  path had a second chunk that got dropped. Callers inferred all three, and each inference
+  was wrong in some shape, every one surfacing as partial coverage described as full. It
+  now returns a `FilteredDiff` carrying `dropped` (per **chunk**, not per filename),
+  `clipped`, `full_text`, and derived `missing_files` / `partial_files`. Three consequences:
+  - A path with several `diff --git` blocks (rename+modify, mode+content) where the first
+    fits and the second doesn't is now disclosed as "a later hunk of X is missing" — it was
+    previously described as a mid-file clip, which is a different thing.
+  - A file carried in the excerpt but cut mid-hunk is named as such even when other files
+    were also dropped, instead of the excerpt reading as though it held that file whole.
+  - "Larger than a single read" is claimed only when the on-disk diff actually exceeds an
+    agent read tool's limits, rather than unconditionally — and checks **both** of them
+    (pi truncates at 2000 lines *or* 50KiB, whichever hits first), so a line-dense diff
+    under the byte cap is not advertised as readable in one go.
+- **`second-opinion-eval` measures the reviewer it claims to.** `eval.review_diff` carried a
+  hand-copied `user_turn` with no truncation handling, so on any diff over `max-diff-chars`
+  it fed the agent a capped excerpt with no disclosure and no on-disk full diff — measuring
+  the pre-remediation reviewer while its docstring promised "the reviewer AS CONFIGURED",
+  and biased hardest on large PRs, which is where recall questions usually live. Both
+  callers now share `truncation_notice()` / `write_full_diff()` / `coverage_phrase()`, so
+  they cannot drift again.
+
 ## [1.5.0] - 2026-08-05
 
 ### Changed

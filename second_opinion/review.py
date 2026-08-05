@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 import re
+from typing import NamedTuple
 
 # The agentic reviewer reads the checked-out repo with tools, so it's told to verify
 # in context — and explicitly NOT to read other reviewers' comments (decorrelation).
@@ -148,35 +149,85 @@ def _excluded(path: str, globs: list[str]) -> bool:
 TRUNCATION_TRAILER = "\n\n[... diff truncated for length ...]\n"
 
 
-def filter_diff(diff: str, exclude_globs: list[str], max_chars: int) -> tuple[str, list[str], bool]:
+class FilteredDiff(NamedTuple):
+    """What `filter_diff` actually did — not merely that it did something.
+
+    The old return was `(text, files, truncated)`, which said an excerpt was capped but
+    never *how*: which chunks vanished, whether the last kept one was cut mid-hunk, or
+    whether a path had a second chunk that got dropped. Callers had to infer all three,
+    and every inference was wrong in some shape, each one surfacing as "partial coverage
+    described as full". Reporting the facts here is what stops callers guessing."""
+    text: str                 # the excerpt, carrying TRUNCATION_TRAILER when truncated
+    files: list[str]          # paths of chunks present in the excerpt, in order
+    truncated: bool
+    dropped: list[str]        # paths of chunks NOT in the excerpt, in order. A path can
+                              # appear here *and* in `files` when it has several chunks.
+    clipped: str | None       # path of the chunk cut mid-hunk, if any
+    full_text: str            # every non-excluded chunk, uncapped, no trailer
+
+    @property
+    def missing_files(self) -> list[str]:
+        """Paths absent from the excerpt entirely (deduped, order preserved)."""
+        seen = set(self.files)
+        out: list[str] = []
+        for p in self.dropped:
+            if p not in seen and p not in out:
+                out.append(p)
+        return out
+
+    @property
+    def partial_files(self) -> list[str]:
+        """Paths present in the excerpt but missing a later chunk (deduped)."""
+        seen = set(self.files)
+        out: list[str] = []
+        for p in self.dropped:
+            if p in seen and p not in out:
+                out.append(p)
+        return out
+
+
+def filter_diff(diff: str, exclude_globs: list[str], max_chars: int) -> FilteredDiff:
     """Drop excluded/generated files and cap total size at whole-file boundaries.
-    Returns (diff, files, truncated)."""
+
+    Excluded files are not "dropped" — they were never in scope; `dropped` means material
+    the cap removed, which is what a caller has to disclose."""
     out: list[str] = []
     files: list[str] = []
+    kept: list[str] = []
+    dropped: list[str] = []
+    clipped: str | None = None
     total = 0
     truncated = False
+    capping = False
     for chunk in _split_by_file(diff):
         path = _file_of_chunk(chunk)
         if _excluded(path, exclude_globs):
+            continue
+        kept.append(chunk)
+        if capping:
+            # Past the cap: keep walking so `dropped` and `full_text` are complete rather
+            # than stopping at the first overflow and reporting an unknown remainder.
+            dropped.append(path)
             continue
         if total + len(chunk) <= max_chars:
             out.append(chunk)
             files.append(path)
             total += len(chunk)
         elif not out:
-            clipped = chunk[:max_chars]
-            clipped = clipped[:clipped.rfind("\n") + 1] or clipped
-            out.append(clipped)
+            head = chunk[:max_chars]
+            head = head[:head.rfind("\n") + 1] or head
+            out.append(head)
             files.append(path)
-            truncated = True
-            break
+            clipped = path
+            truncated = capping = True
         else:
-            truncated = True
-            break
+            dropped.append(path)
+            truncated = capping = True
     joined = "".join(out)
     if truncated:
         joined += TRUNCATION_TRAILER
-    return joined, files, truncated
+    return FilteredDiff(text=joined, files=files, truncated=truncated, dropped=dropped,
+                        clipped=clipped, full_text="".join(kept))
 
 
 def reorder_unseen_first(diff: str, unseen: list[str]) -> str:

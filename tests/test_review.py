@@ -21,18 +21,78 @@ def test_file_of_chunk_prefers_header_and_handles_dev_null():
     assert rv._file_of_chunk(add) == "new file.py"  # spaces + /dev/null fallback
 
 
+def _chunk(path, body_lines):
+    return (f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+            f"@@ -1 +1 @@\n" + "".join(f"+{l}\n" for l in body_lines))
+
+
 def test_filter_diff_excludes_globs_and_lists_files():
-    out, files, truncated = rv.filter_diff(DIFF, ["**/*.lock"], 60000)
-    assert files == ["src/app.py"]      # pkg.lock dropped
-    assert "pkg.lock" not in out
-    assert not truncated
+    fd = rv.filter_diff(DIFF, ["**/*.lock"], 60000)
+    assert fd.files == ["src/app.py"]      # pkg.lock dropped
+    assert "pkg.lock" not in fd.text
+    assert not fd.truncated
+    # An excluded file is not "dropped by truncation" — it was never in scope.
+    assert fd.dropped == [] and fd.clipped is None
+    # full_text is the complete filtered diff: no cap, no trailer.
+    assert "pkg.lock" not in fd.full_text
+    assert rv.TRUNCATION_TRAILER not in fd.full_text
 
 
 def test_filter_diff_truncates_at_whole_file_boundary():
-    out, files, truncated = rv.filter_diff(DIFF, [], max_chars=80)
-    assert truncated
-    assert files == ["src/app.py"]      # second file dropped whole, not cut mid-hunk
-    assert "[... diff truncated for length ...]" in out
+    # Cap set exactly at the first chunk, so it fits whole and the second is dropped
+    # entirely — no mid-hunk cut.
+    first = rv._split_by_file(DIFF)[0]
+    fd = rv.filter_diff(DIFF, [], max_chars=len(first))
+    assert fd.truncated
+    assert fd.files == ["src/app.py"]
+    assert fd.dropped == ["pkg.lock"]
+    assert fd.clipped is None           # nothing was cut mid-hunk
+    assert "[... diff truncated for length ...]" in fd.text
+    assert fd.missing_files == ["pkg.lock"] and fd.partial_files == []
+
+
+def test_filter_diff_distinguishes_a_clipped_first_chunk_from_a_dropped_file():
+    # This case previously read as identical to the one above: `truncated=True` and
+    # `files == ["src/app.py"]`. It is not — here app.py is itself cut mid-hunk AND
+    # pkg.lock is gone. The old three-tuple could not express the difference, and the
+    # test that covered it asserted the wrong mechanism in its comment.
+    fd = rv.filter_diff(DIFF, [], max_chars=80)
+    assert fd.truncated
+    assert fd.files == ["src/app.py"]
+    assert fd.clipped == "src/app.py"   # cut mid-hunk, not carried whole
+    assert fd.missing_files == ["pkg.lock"]
+
+
+def test_filter_diff_reports_a_chunk_clipped_mid_hunk():
+    # One file overflows the cap on its own: it IS in the excerpt, but cut mid-hunk.
+    # `truncated` alone cannot distinguish this from a whole file being dropped.
+    big = _chunk("src/big.py", [f"line {i}" for i in range(400)])
+    fd = rv.filter_diff(big, [], max_chars=200)
+    assert fd.truncated
+    assert fd.files == ["src/big.py"]
+    assert fd.clipped == "src/big.py"       # <- the fact callers had to guess
+    assert fd.dropped == []
+    assert fd.missing_files == [] and fd.partial_files == []
+
+
+def test_filter_diff_tracks_dropped_per_chunk_not_per_filename():
+    # A path can appear in several `diff --git` blocks (rename+modify, mode+content).
+    # If the first fits and the second doesn't, the path is BOTH present and partial —
+    # a filename-set difference reports it as neither.
+    two = _chunk("src/a.py", ["one"]) + _chunk("src/a.py", [f"pad {i}" for i in range(200)])
+    fd = rv.filter_diff(two, [], max_chars=len(_chunk("src/a.py", ["one"])) + 10)
+    assert fd.truncated
+    assert fd.files == ["src/a.py"]
+    assert fd.dropped == ["src/a.py"]       # a second chunk of the same path vanished
+    assert fd.partial_files == ["src/a.py"]  # present, but missing a later hunk
+    assert fd.missing_files == []            # not wholly absent — don't say it is
+
+
+def test_filter_diff_untruncated_full_text_equals_excerpt():
+    fd = rv.filter_diff(DIFF, [], 60000)
+    assert not fd.truncated
+    assert fd.text == fd.full_text
+    assert fd.dropped == [] and fd.clipped is None
 
 
 def test_glob_semantics():
