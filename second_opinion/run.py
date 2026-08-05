@@ -693,14 +693,17 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
                     return
 
         if MAX_PASS_COST_USD and not MAX_PASS_TOKENS and _model_prices(model) is None:
-            # "I set a spend ceiling, so I'm protected" is the false assurance to avoid.
-            # PROVIDER=local never prices (the offline invariant), and a failed OpenRouter
-            # lookup is deliberately left uncached — either way cost stays 0.0 and the
-            # ceiling can never trip, leaving the pass bounded only by the clock.
+            # Careful with the claim: the ceiling reads pi's own usage.cost.total FIRST and
+            # only falls back to a list-price estimate, so a missing lookup does not prove
+            # the ceiling is dead — on a --watch daemon a transient /v1/models blip would
+            # otherwise cry INACTIVE at a pass that is genuinely protected. Say what is
+            # actually known: the fallback is gone, so the ceiling now depends entirely on
+            # pi pricing this model itself.
             _annotate("warning",
-                      f"cost ceiling INACTIVE: no pricing available for {model}, so "
-                      f"MAX_PASS_COST_USD can never trip and this pass is bounded only "
-                      f"by the clock. Set MAX_PASS_TOKENS instead.")
+                      f"cost ceiling AT RISK: no list pricing for {model}, so "
+                      f"MAX_PASS_COST_USD can only trip if pi prices the model itself — "
+                      f"if it does not, this pass is bounded only by the clock. "
+                      f"MAX_PASS_TOKENS needs no pricing and is the reliable lever.")
         if MAX_PASS_TOKENS or MAX_PASS_COST_USD:
             threading.Thread(target=_watch, daemon=True).start()
         try:
@@ -1369,9 +1372,11 @@ def sweep(args: argparse.Namespace) -> bool:
     merge_desc = f"{MERGE_PROVIDER}:{merge_model}" if K > 1 else "n/a (K=1)"
     log(f"second opinion · provider={PROVIDER} · model={model} · K={K} · merge={merge_desc} "
         f"· {len(targets)} candidate PR(s)")
-    for problem in _CONFIG_ERRORS:
-        # Surfaced here rather than at import: _annotate is defined below the constants,
-        # and a misconfigured ceiling must not be a silent no-op.
+    while _CONFIG_ERRORS:
+        # Drained, not iterated: main() runs once per sweep under --watch, and a mistyped
+        # ceiling should not annotate red on every tick for the daemon's lifetime.
+        # Surfaced here rather than at import because _annotate is defined below.
+        problem = _CONFIG_ERRORS.pop(0)
         log(f"config: {problem}")
         _annotate("error", f"config: {problem}")
     silent_failure = False

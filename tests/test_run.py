@@ -666,7 +666,9 @@ def test_cost_only_ceiling_warns_when_pricing_is_unavailable():
         res = run.run_pass("/wt", "m", "sys", "usr")
         assert res.status == "ok", res
         msg = " ".join(m for _l, m in ann)
-        assert "cost ceiling INACTIVE" in msg, msg
+        assert "cost ceiling AT RISK" in msg, msg
+        # Must not claim the ceiling is dead: it reads pi's own cost first.
+        assert "INACTIVE" not in msg, msg
         assert "MAX_PASS_TOKENS" in msg, msg
     finally:
         run.subprocess.Popen, run._model_prices = real_popen, real_prices
