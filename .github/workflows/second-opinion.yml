@@ -25,7 +25,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 30 > the 1500s pass timeout below plus image build/checkout, so the job never kills
+    # a pass before the pass's own timeout can report it as degraded.
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
@@ -35,3 +37,11 @@ jobs:
         with:
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           guidance-file: .github/review-guidance.md
+          # This repo's own PRs outgrew the 900s default: an agentic pass on a large diff
+          # with a reasoning model hits the wall and reds the check as degraded, with no
+          # review — reviewer malfunction reported as if it were a verdict. Observed on
+          # #21 (900s timeout) after two completed runs on the same PR burned 502k then
+          # 923k tokens as the diff grew. A dogfood check that fails on its own medium
+          # PRs teaches you to ignore it, which is the one thing this tripwire cannot
+          # afford.
+          pass-timeout-seconds: "1500"
