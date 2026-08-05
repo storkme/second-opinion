@@ -645,6 +645,7 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
     # the checkout token. Trusting PR authors is the real boundary; see README Security.)
     env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
     prior_files = _list_session_files(session_dir)
+    proc = None
     try:
         # Popen rather than subprocess.run so a watchdog can watch the pass WHILE it runs.
         # The watchdog is a thread, not a communicate() poll loop: communicate() accepts
@@ -747,6 +748,21 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
             return _finish_pass(model, session_dir, internal, "", "empty", prior_files)
         return _finish_pass(model, session_dir, internal, text, "ok", prior_files)
     finally:
+        # subprocess.run wrapped its Popen in a `with` and killed the child on ANY
+        # exception; a raw Popen does not, and that regression is worse here than
+        # elsewhere: the inner `finally: stop.set()` has already retired the watchdog by
+        # the time an exception reaches this point, so an orphaned pi would keep burning
+        # tokens with no ceiling at all — the exact failure this feature exists to bound.
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                pass
+            try:
+                proc.wait(timeout=10)   # reap, so no zombie is left behind
+            except Exception:  # noqa: BLE001
+                pass
         # Safety net for the paths _finish_pass never reaches. Redaction lives ONLY
         # in _finish_pass, which every normal return goes through — but an exception
         # escaping this function (a UnicodeDecodeError out of text=True on non-UTF-8

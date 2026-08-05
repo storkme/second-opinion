@@ -689,6 +689,48 @@ def test_timeout_fallback_survives_bytes_from_timeoutexpired():
         run._annotate = _REAL_ANNOTATE
 
 
+def test_an_exception_still_kills_and_reaps_the_child():
+    # subprocess.run wrapped its Popen in a `with` and killed the child on ANY exception.
+    # A raw Popen does not — and by the time an exception reaches the outer finally the
+    # watchdog has already been retired by `stop.set()`, so an orphaned pi would keep
+    # burning tokens with no ceiling: the failure this whole feature exists to bound.
+    real_popen = run.subprocess.Popen
+    state = {"killed": 0, "waited": 0, "alive": True}
+
+    class Orphan:
+        returncode = None
+
+        def __init__(self, cmd, **k):
+            pass
+
+        def poll(self):
+            return None if state["alive"] else -9
+
+        def communicate(self, input=None, timeout=None):
+            raise OSError("read failed mid-stream")   # not TimeoutExpired
+
+        def kill(self):
+            state["killed"] += 1
+            state["alive"] = False
+
+        def wait(self, timeout=None):
+            state["waited"] += 1
+            return -9
+
+    run.subprocess.Popen = Orphan
+    try:
+        try:
+            run.run_pass("/wt", "m", "sys", "usr")
+        except OSError:
+            pass                                       # must still propagate
+        else:
+            raise AssertionError("expected the OSError to propagate")
+        assert state["killed"] == 1, "child was left running with no watchdog"
+        assert state["waited"] == 1, "child was never reaped"
+    finally:
+        run.subprocess.Popen = real_popen
+
+
 def test_should_fail_only_on_degraded_without_post():
     # The exit-2 contract: a degraded pass that posted nothing is the only failure.
     assert (
