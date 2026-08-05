@@ -20,7 +20,11 @@ All notable changes to this project are documented here. The format follows
   identically for a pass working flat out (2.3M tok), one hung at ~30 tok/s, and one looping
   at ~7000 tok/s — three failure modes with three different remedies, indistinguishable in the
   checks UI. Every degraded annotation now carries `N tok · $C`, so a runaway is recognisable
-  without opening the run log.
+  without opening the run log. A `runaway` additionally names the spend that tripped the
+  ceiling. If a cost ceiling is set but pricing is unavailable — `PROVIDER=local` never
+  prices, and a failed lookup is deliberately uncached — the run says so rather than
+  silently not protecting, and a non-numeric ceiling disables loudly instead of crashing
+  the process at import.
 
 ### Fixed
 - **`filter_diff` now reports what it did, instead of callers guessing.** It returned

@@ -90,10 +90,27 @@ PASS_TIMEOUT_S = int(_pt) if _pt else 1800
 # the numbers. Tokens are the primary lever because they are provider-neutral and always
 # available; cost depends on a pricing lookup that returns None when it fails, which would
 # silently disable a cost-only ceiling.
-_mpt = os.environ.get("MAX_PASS_TOKENS", "").strip()
-MAX_PASS_TOKENS = int(_mpt) if _mpt else 0
-_mpc = os.environ.get("MAX_PASS_COST_USD", "").strip()
-MAX_PASS_COST_USD = float(_mpc) if _mpc else 0.0
+# Deferred because _annotate is defined below; main() emits these at startup.
+_CONFIG_ERRORS: list[str] = []
+
+
+def _num_env(name: str, cast, default):
+    """Parse a numeric env knob, or disable it loudly. `max-pass-cost-usd: "$1.96"` and
+    `"1,000"` are natural operator mistakes, and a raw ValueError traceback at import is
+    the opposite of this project's "fail legibly through the degraded machinery" rule."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return cast(raw)
+    except ValueError:
+        _CONFIG_ERRORS.append(f"{name}={raw!r} is not a number — ignoring it, so that "
+                              f"ceiling is INACTIVE for this run")
+        return default
+
+
+MAX_PASS_TOKENS = _num_env("MAX_PASS_TOKENS", int, 0)
+MAX_PASS_COST_USD = _num_env("MAX_PASS_COST_USD", float, 0.0)
 BUDGET_POLL_S = 20
 REPO_DIR = os.environ.get("REPO_DIR", "").strip() or os.getcwd()
 PI_FLAGS = ["--no-extensions", "--no-skills", "--no-themes",
@@ -675,6 +692,15 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
                     proc.kill()
                     return
 
+        if MAX_PASS_COST_USD and not MAX_PASS_TOKENS and _model_prices(model) is None:
+            # "I set a spend ceiling, so I'm protected" is the false assurance to avoid.
+            # PROVIDER=local never prices (the offline invariant), and a failed OpenRouter
+            # lookup is deliberately left uncached — either way cost stays 0.0 and the
+            # ceiling can never trip, leaving the pass bounded only by the clock.
+            _annotate("warning",
+                      f"cost ceiling INACTIVE: no pricing available for {model}, so "
+                      f"MAX_PASS_COST_USD can never trip and this pass is bounded only "
+                      f"by the clock. Set MAX_PASS_TOKENS instead.")
         if MAX_PASS_TOKENS or MAX_PASS_COST_USD:
             threading.Thread(target=_watch, daemon=True).start()
         try:
@@ -720,9 +746,10 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
                         if not internal else
                         "no transcript was retained — set `session-dir` to capture what "
                         "it loops on next time")
+            spend = _spend_note(_read_session_usage(session_dir, exclude=prior_files), model)
             log(f"pi pass aborted — {breach['why']}")
             _annotate("warning",
-                      f"pi pass aborted: {breach['why']} — no review produced. "
+                      f"pi pass aborted: {breach['why']}{spend} — no review produced. "
                       f"A longer timeout would only raise the bill; {evidence}.")
             return _finish_pass(model, session_dir, internal, "", "runaway", prior_files)
         if proc.returncode != 0:
@@ -1342,6 +1369,11 @@ def sweep(args: argparse.Namespace) -> bool:
     merge_desc = f"{MERGE_PROVIDER}:{merge_model}" if K > 1 else "n/a (K=1)"
     log(f"second opinion · provider={PROVIDER} · model={model} · K={K} · merge={merge_desc} "
         f"· {len(targets)} candidate PR(s)")
+    for problem in _CONFIG_ERRORS:
+        # Surfaced here rather than at import: _annotate is defined below the constants,
+        # and a misconfigured ceiling must not be a silent no-op.
+        log(f"config: {problem}")
+        _annotate("error", f"config: {problem}")
     silent_failure = False
     for t in targets:
         n, sha, title = t["number"], t["headRefOid"], t["title"]

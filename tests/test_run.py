@@ -583,6 +583,116 @@ def test_a_pass_that_finishes_over_the_ceiling_keeps_its_review():
         shutil.rmtree(session, ignore_errors=True)
 
 
+def test_cost_ceiling_kills_and_names_the_dollars():
+    # Both reviewers flagged this: every other spend test drives MAX_PASS_TOKENS, so the
+    # cost branch — the subtler one, and the one the docs caution most about — shipped
+    # entirely unexercised.
+    import shutil
+    saved = _spend_env(MAX_PASS_TOKENS=0, MAX_PASS_COST_USD=0.50)
+    real_popen, real_poll = run.subprocess.Popen, run.BUDGET_POLL_S
+    run.BUDGET_POLL_S = 0.05
+    session = tempfile.mkdtemp(prefix="so-cost-")
+    os.environ["PI_SESSION_DIR"] = session
+    killed = {"n": 0}
+
+    class FakePopen:
+        returncode = -9
+
+        def __init__(self, cmd, **k):
+            sd = cmd[cmd.index("--session-dir") + 1]
+            os.makedirs(sd, exist_ok=True)
+            # pi's own cost.total, so no pricing lookup is needed for the primary path.
+            with open(os.path.join(sd, "c.jsonl"), "w") as fh:
+                for _ in range(4):
+                    fh.write('{"message":{"usage":{"totalTokens":10,'
+                             '"cost":{"total":0.25}}}}\n')
+
+        def poll(self):
+            return None if not killed["n"] else -9
+
+        def communicate(self, input=None, timeout=None):
+            import time
+            for _ in range(200):
+                if killed["n"]:
+                    return ("", "")
+                time.sleep(0.02)
+            raise AssertionError("cost ceiling never tripped")
+
+        def kill(self):
+            killed["n"] += 1
+
+    run.subprocess.Popen = FakePopen
+    ann = _capture_annotations()
+    try:
+        res = run.run_pass("/wt", "m", "sys", "usr")
+        assert res.status == "runaway", res
+        msg = " ".join(m for _l, m in ann)
+        assert "$1.0000 over the $0.50 ceiling" in msg, msg
+    finally:
+        run.subprocess.Popen, run.BUDGET_POLL_S = real_popen, real_poll
+        for k, v in saved.items():
+            setattr(run, k, v)
+        os.environ.pop("PI_SESSION_DIR", None)
+        run._annotate = _REAL_ANNOTATE
+        shutil.rmtree(session, ignore_errors=True)
+
+
+def test_cost_only_ceiling_warns_when_pricing_is_unavailable():
+    # PROVIDER=local never prices (offline invariant) and a failed OpenRouter lookup is
+    # left uncached — either way cost stays 0.0 and the ceiling can never trip. Silently
+    # not protecting is the false assurance to avoid.
+    saved = _spend_env(MAX_PASS_TOKENS=0, MAX_PASS_COST_USD=1.0)
+    real_popen, real_prices = run.subprocess.Popen, run._model_prices
+    run._model_prices = lambda model: None          # no pricing available
+
+    class Quick:
+        returncode = 0
+
+        def __init__(self, cmd, **k):
+            pass
+
+        def poll(self):
+            return 0
+
+        def communicate(self, input=None, timeout=None):
+            return ("a finding", "")
+
+        def kill(self):
+            pass
+
+    run.subprocess.Popen = Quick
+    ann = _capture_annotations()
+    try:
+        res = run.run_pass("/wt", "m", "sys", "usr")
+        assert res.status == "ok", res
+        msg = " ".join(m for _l, m in ann)
+        assert "cost ceiling INACTIVE" in msg, msg
+        assert "MAX_PASS_TOKENS" in msg, msg
+    finally:
+        run.subprocess.Popen, run._model_prices = real_popen, real_prices
+        for k, v in saved.items():
+            setattr(run, k, v)
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_a_currency_formatted_ceiling_disables_loudly_instead_of_crashing():
+    # `max-pass-cost-usd: "$1.96"` is a natural operator mistake; float() would raise at
+    # import and red the job as a raw traceback rather than a legible failure.
+    errs = list(run._CONFIG_ERRORS)
+    try:
+        os.environ["MAX_PASS_COST_USD"] = "$1.96"
+        run._CONFIG_ERRORS.clear()
+        assert run._num_env("MAX_PASS_COST_USD", float, 0.0) == 0.0
+        assert run._CONFIG_ERRORS and "not a number" in run._CONFIG_ERRORS[0]
+        assert "INACTIVE" in run._CONFIG_ERRORS[0]
+        os.environ["MAX_PASS_TOKENS"] = "5000000"
+        assert run._num_env("MAX_PASS_TOKENS", int, 0) == 5000000
+    finally:
+        os.environ.pop("MAX_PASS_COST_USD", None)
+        os.environ.pop("MAX_PASS_TOKENS", None)
+        run._CONFIG_ERRORS[:] = errs
+
+
 def test_no_ceiling_configured_means_no_watchdog():
     # Opt-in: with no ceiling set, behaviour must be byte-identical to before — killing a
     # legitimately long pass is its own failure, and one incident is thin evidence.
