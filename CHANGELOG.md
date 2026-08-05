@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
-## [Unreleased]
+## [1.5.0] - 2026-08-05
 
 ### Changed
 - **Default `pass-timeout-seconds` raised from 900 to 1800**, and the provider split for this
@@ -224,7 +224,8 @@ All notable changes to this project are documented here. The format follows
   - Per-project guidance file (the reviewer's "memory"), HTML-marker idempotency (no database),
     and decorrelated, advisory-never-a-gate framing.
 
-[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/storkme/second-opinion/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/storkme/second-opinion/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/storkme/second-opinion/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/storkme/second-opinion/compare/v1.2.0...v1.2.1
