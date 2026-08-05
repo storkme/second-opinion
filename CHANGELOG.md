@@ -5,6 +5,35 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Fixed
+- A flaked union merge no longer throws away the review it was given. When `K>1`, the merge
+  call is retried once, and if it fails twice the raw passes are posted unmerged behind a
+  header note and a `::warning` annotation. The passes *are* the review and the merge is
+  only editorial, so a merge-step outage now degrades formatting instead of delivery —
+  previously a single empty-content 200 after K successful passes discarded all of them and
+  turned the required check red. `merge_reviews()` no longer raises. Cost/token accounting
+  sums every attempt, so a retried merge reports what it actually spent rather than only
+  the winning call, and when both attempts fail the annotation names *both* reasons — a
+  `402` followed by an empty 200 is credits exhaustion, not a model flake, and collapsing
+  to the last reason hid the actionable one. The posted header reads `×K unmerged` on that
+  path rather than claiming a `union ×K` that did not happen.
+- **An oversized review is now clipped instead of lost.** GitHub rejects a comment body
+  over 65536 characters, and nothing bounded the posted review (`max-diff-chars` caps the
+  *input*). An over-cap body failed the post, and the error surfaced as a silent failure —
+  exit 2 with no review at all. The body is now trimmed to fit, behind a truncation note
+  and a `::warning`; the marker and cost footer are preserved so idempotency and reporting
+  still work. This mattered most on the new unmerged-fallback path, whose body concatenates
+  the K raw passes with no dedup and is therefore larger than the merged body would be.
+  The budget is counted in UTF-8 bytes rather than code points: GitHub documents the cap
+  in "characters" without pinning the unit, and the comment is not ASCII, so a byte budget
+  is the only one that holds under every reading.
+- `second-opinion-eval` inherits the merge fallback. Previously a merge flake raised and
+  the eval loop skipped that PR entirely; now it judges the raw passes, which is what
+  production would have posted — so eval measures real behaviour. The eval log gains the
+  fallback's `::warning` line when this happens.
+
 ## [1.3.0] - 2026-08-04
 
 ### Security

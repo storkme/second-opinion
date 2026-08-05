@@ -39,22 +39,232 @@ def test_merge_reviews_parses_and_strips_content():
     assert run.merge_reviews(1, "t", ["pass a", "pass b"]) == "merged"
 
 
-def test_merge_reviews_raises_clean_on_malformed_200():
-    # empty choices / error envelope / moderation-shaped — must be a clean RuntimeError,
-    # not a raw KeyError/IndexError leaking to the caller.
-    for payload in (
-        {"choices": []},
-        {"error": {"message": "bad"}},
-        {},
-        {"choices": [{}]},
-    ):
+def test_merge_reviews_retries_once_on_empty_then_succeeds():
+    # A single flake must not cost the run its review: attempt 1 empty, attempt 2 good.
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return _Resp({"choices": []})
+        return _Resp({"choices": [{"message": {"content": "merged"}}]})
+
+    run.requests.post = post
+    ann = _capture_annotations()
+    try:
+        assert run.merge_reviews(1, "t", ["a", "b"]) == "merged"
+        assert len(calls) == 2, "expected exactly one retry"
+        assert ann == [], "a recovered merge must not annotate"
+    finally:
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_merge_reviews_falls_back_to_raw_passes_after_two_failures():
+    # Every malformed-but-200 envelope, plus a raising transport. merge_reviews must never
+    # raise — the passes are the review, so they get posted unmerged with a loud warning.
+    for payload in ({"choices": []}, {"error": {"message": "bad"}}, {}, {"choices": [{}]}):
         run.requests.post = lambda *a, p=payload, **k: _Resp(p)
+        ann = _capture_annotations()
         try:
-            run.merge_reviews(1, "t", ["a"])
-        except RuntimeError as e:
-            assert "no usable content" in str(e)
-        else:
-            raise AssertionError(f"expected RuntimeError for payload {payload}")
+            out = run.merge_reviews(1, "t", ["finding a", "finding b"])
+            assert "finding a" in out and "finding b" in out, payload
+            assert "union merge unavailable" in out, payload
+            assert [lvl for lvl, _ in ann] == ["warning"], payload
+        finally:
+            run._annotate = _REAL_ANNOTATE
+
+    def boom(*a, **k):
+        raise RuntimeError("connection reset")
+
+    run.requests.post = boom
+    ann = _capture_annotations()
+    try:
+        out = run.merge_reviews(1, "t", ["finding a", "finding b"])
+        assert "finding a" in out and "finding b" in out
+        assert [lvl for lvl, _ in ann] == ["warning"]
+        assert "raised RuntimeError" in ann[0][1]
+    finally:
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_merge_reviews_annotation_reports_both_attempt_failures():
+    # The attempts can fail differently, and the difference is the operator-actionable
+    # part: a 402 then an empty 200 is credits exhaustion — a persistent condition that
+    # recurs every sweep — not "the model flaked". Collapsing to the last reason hides it.
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("402 requires more credits")
+        return _Resp({"choices": []})
+
+    run.requests.post = post
+    ann = _capture_annotations()
+    try:
+        out = run.merge_reviews(1, "t", ["finding a", "finding b"])
+        assert "finding a" in out
+        msg = ann[0][1]
+        assert "attempt 1 raised RuntimeError" in msg and "402" in msg, msg
+        assert "attempt 2 returned no usable content" in msg, msg
+    finally:
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_merge_reviews_flags_the_unmerged_fallback_to_the_caller():
+    # The posted header must not advertise a "union ×K" that never happened.
+    run.requests.post = lambda *a, **k: _Resp({"choices": []})
+    ann = _capture_annotations()
+    try:
+        meta: dict = {}
+        run.merge_reviews(1, "t", ["a", "b"], meta=meta)
+        assert meta.get("merged") is False, meta
+    finally:
+        run._annotate = _REAL_ANNOTATE
+
+    # ...and a successful merge leaves the flag alone, so the caller's default holds.
+    run.requests.post = lambda *a, **k: _Resp(
+        {"choices": [{"message": {"content": "merged"}}]})
+    meta = {}
+    assert run.merge_reviews(1, "t", ["a", "b"], meta=meta) == "merged"
+    assert meta.get("merged", True) is True, meta
+
+
+def test_review_pr_header_says_unmerged_when_the_merge_fell_back():
+    import contextlib
+    import io
+    real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
+    run.K = 2
+    real_deps = _stub_review_pr_deps()
+
+    def fallback_merge(pr, title, passes, merge_model=None, meta=None):
+        if meta is not None:
+            meta["merged"] = False
+        return "RAW PASSES"
+
+    run.merge_reviews = fallback_merge
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult("text", "ok")
+    _capture_annotations()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+        body = buf.getvalue()
+        assert "×2 unmerged" in body, body
+        assert "union ×2" not in body, body
+    finally:
+        run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+        run.PROVIDER = real_provider
+        _restore_review_pr_deps(real_deps)
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_posted_body_is_clipped_under_githubs_comment_limit():
+    # The unmerged fallback concatenates K raw passes with no dedup, so it is strictly
+    # larger than the merged body would have been. Over GitHub's 65536-char cap the post
+    # 422s, the exception escapes review_pr, and sweep files it as a silent failure —
+    # exit 2 with NO review, the exact outcome the fallback exists to prevent.
+    import contextlib
+    import io
+    real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
+    run.K = 3
+    real_deps = _stub_review_pr_deps()
+    huge = "x" * 40000
+    run.merge_reviews = lambda pr, title, passes, merge_model=None, meta=None: "\n".join(passes)
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult(huge, "ok")
+    ann = _capture_annotations()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+        assert out.posted is True
+        # The dry-run print wraps the body in banners, so bound the body itself.
+        body = buf.getvalue()
+        assert len(body) < run.COMMENT_MAX + 2000, len(body)
+        assert "truncated to fit GitHub's comment size limit" in body
+        assert any("clipped" in m for _lvl, m in ann), ann
+    finally:
+        run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+        run.PROVIDER = real_provider
+        _restore_review_pr_deps(real_deps)
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_clip_review_body_preserves_short_bodies_and_marker_position():
+    # A body that fits is returned byte-identical (no gratuitous rewriting), and clipping
+    # only ever touches the body — the marker leads the comment and dedup is a startswith.
+    assert run._clip_review_body("short", reserved=100) == "short"
+    clipped = run._clip_review_body("y" * 5000, reserved=0, limit=1000)
+    assert len(clipped.encode("utf-8")) <= 1000
+    assert clipped.startswith("yyy") and "truncated" in clipped
+    # The result must never exceed the room it was given, at any limit — including the
+    # window where there isn't even room for the truncation notice, and the degenerate
+    # case where the header/footer alone fill the cap. Budget is UTF-8 BYTES, so a
+    # multi-byte body must not sneak over the cap by being short in code points.
+    for body in ("z" * 5000, "🤖" * 2000, "é—×" * 1500):
+        for limit in range(0, 400, 7):
+            out = run._clip_review_body(body, reserved=0, limit=limit)
+            assert len(out.encode("utf-8")) <= max(0, limit), (body[:2], limit, out)
+            out.encode("utf-8").decode("utf-8")  # never splits a character
+
+
+def test_posted_comment_fits_the_cap_in_bytes_not_just_code_points():
+    # The assembled comment is not ASCII — the header alone carries 🤖/—/× — so a
+    # code-point budget would pass here while the real byte length overflowed.
+    import contextlib
+    import io
+    real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
+    run.K = 1
+    real_deps = _stub_review_pr_deps()
+    # Every char is 4 UTF-8 bytes: 40000 code points = 160000 bytes, way over the cap.
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult("🤖" * 40000, "ok")
+    _capture_annotations()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+        assert out.posted is True
+        printed = buf.getvalue()
+        start = printed.index("<!-- second-opinion sha=")
+        # The dry-run print wraps the body in "\n{body}\n"; production writes exactly
+        # `body` via --body-file. Strip the added newline so the assertion matches the
+        # real cap rather than rejecting a body one byte under it.
+        comment = printed[start:].rstrip("\n")
+        assert len(comment.encode("utf-8")) <= run.COMMENT_MAX, len(comment.encode("utf-8"))
+    finally:
+        run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+        run.PROVIDER = real_provider
+        _restore_review_pr_deps(real_deps)
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_merge_reviews_accumulates_cost_across_a_retried_attempt():
+    # The expensive failure mode is a reasoning-burn empty: it bills full freight and
+    # returns nothing. Reporting only the winning attempt would understate spend on
+    # exactly the runs that cost the most, so meta must accumulate across attempts.
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        usage = {"cost": 0.02, "total_tokens": 1000,
+                 "completion_tokens_details": {"reasoning_tokens": 900}}
+        if len(calls) == 1:
+            return _Resp({"choices": [{"message": {"content": ""}}], "usage": usage})
+        return _Resp({"choices": [{"message": {"content": "merged"}}], "usage": usage})
+
+    run.requests.post = post
+    meta: dict = {}
+    assert run.merge_reviews(1, "t", ["a", "b"], meta=meta) == "merged"
+    assert len(calls) == 2
+    assert meta["cost"] == 0.04, meta          # both attempts, not just the winner
+    assert meta["tokens"] == 2000, meta
+    assert meta["reasoning_tokens"] == 1800, meta
 
 
 def _capture_annotations():
@@ -168,6 +378,102 @@ def test_review_pr_worktree_add_failure_is_degraded_and_annotates():
     out = run.review_pr(7, "t", "deadbeef00", "m", "m", dry_run=True)
     assert out == run.ReviewOutcome(posted=False, degraded=True)
     assert ann[0][0] == "error" and "worktree add failed" in ann[0][1]
+
+
+def _stub_review_pr_deps():
+    """Common stubs for driving review_pr past the diff fetch and worktree add. Returns the
+    originals so the caller can restore them — leaving these swapped is latent cross-test
+    pollution (it already broke the run_pass tests once during this file's development)."""
+    originals = (run._gh, run._git, run.rv.shuffle_inputs)
+    run._gh = lambda args, timeout_s=60: (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n")
+    run._git = lambda args, check=True: FakeProc(0)
+    run.rv.shuffle_inputs = lambda d, i: f"<<{i}>>"
+    return originals
+
+
+def _restore_review_pr_deps(originals):
+    run._gh, run._git, run.rv.shuffle_inputs = originals
+
+
+def test_review_pr_parallel_passes_run_concurrently_and_keep_order():
+    # All K passes must be in flight AT ONCE — the barrier times out loudly if any pass
+    # waits on another (i.e. the loop silently went sequential, losing the wall-clock win
+    # this path exists for). Results keep index order, empties drop, and a degraded sibling
+    # of a posted union still reports degraded=True per the exit contract.
+    import threading
+    barrier = threading.Barrier(3, timeout=10)
+    real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    # Pin the provider: the parallel branch gates on PROVIDER == "openrouter", so under a
+    # PROVIDER=local environment (a supported config) these would silently test the
+    # sequential path and fail on the barrier/session-dir assertions.
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
+    run.K = 3
+    real_deps = _stub_review_pr_deps()
+    merged = {}
+
+    def fake_merge(pr, title, passes, merge_model=None, meta=None):
+        merged["passes"] = passes
+        return "MERGED"
+
+    run.merge_reviews = fake_merge
+
+    def fake_pass(wt, model, system, user, session_dir=None):
+        barrier.wait()  # BrokenBarrierError after 10s if the passes are serialized
+        tag = user.split("<<")[1].split(">>")[0] if "<<" in user else "0"
+        if tag == "1":
+            return run.PassResult("", "timeout")  # one degraded sibling
+        return run.PassResult(f"pass-{tag}", "ok")
+
+    run.run_pass = fake_pass
+    _capture_annotations()
+    try:
+        out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+        assert out == run.ReviewOutcome(posted=True, degraded=True)
+        assert merged["passes"] == ["pass-0", "pass-2"]  # index order kept, empty dropped
+    finally:
+        run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+        run.PROVIDER = real_provider
+        _restore_review_pr_deps(real_deps)
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_pr_parallel_passes_get_distinct_session_dirs():
+    # Concurrent passes sharing one session dir would interleave transcripts and let each
+    # pass absorb its siblings' usage (the prior-files exclusion is a snapshot taken per
+    # pass), double-counting cost. Each pass must get its own subdir under PI_SESSION_DIR.
+    real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    # Pin the provider: the parallel branch gates on PROVIDER == "openrouter", so under a
+    # PROVIDER=local environment (a supported config) these would silently test the
+    # sequential path and fail on the barrier/session-dir assertions.
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
+    run.K = 3
+    real_deps = _stub_review_pr_deps()
+    run.merge_reviews = lambda pr, title, passes, merge_model=None, meta=None: "MERGED"
+    seen = []
+
+    def fake_pass(wt, model, system, user, session_dir=None):
+        seen.append(session_dir)
+        return run.PassResult("text", "ok")
+
+    run.run_pass = fake_pass
+    _capture_annotations()
+    with tempfile.TemporaryDirectory() as base:
+        os.environ["PI_SESSION_DIR"] = base
+        try:
+            run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+            assert len(seen) == 3 and all(d for d in seen), seen
+            assert len(set(seen)) == 3, f"passes shared a session dir: {seen}"
+            assert sorted(os.path.basename(d) for d in seen) == \
+                ["pass-1", "pass-2", "pass-3"], seen
+        finally:
+            os.environ.pop("PI_SESSION_DIR", None)
+            run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+            run.PROVIDER = real_provider
+            _restore_review_pr_deps(real_deps)
+            run._annotate = _REAL_ANNOTATE
 
 
 def test_already_reviewed_matches_marker_at_start_only():
@@ -540,17 +846,44 @@ def test_finish_pass_redacts_persisted_transcript():
 
 
 def test_model_prices_retries_after_transient_failure():
+    # Pin the provider: _model_prices short-circuits to a cached None under
+    # PROVIDER=local (the offline invariant — never hit a cloud pricing endpoint), so
+    # without this the whole test asserts the wrong code path and fails.
+    real_provider = run.PROVIDER
+    run.PROVIDER = "openrouter"
     run._PRICE_CACHE.clear()
-    # transient network failure: not cached, so the daemon retries next sweep
-    def boom(*a, **k):
-        raise TimeoutError("provider blip")
-    run.requests.get = boom
-    assert run._model_prices("m") is None
-    assert "m" not in run._PRICE_CACHE
-    # a successful lookup (model absent from list) IS cached as None -- no price, no retry
-    run.requests.get = lambda *a, **k: _Resp({"data": [{"id": "other-model"}]})
-    assert run._model_prices("m") is None
-    assert "m" in run._PRICE_CACHE
+    try:
+        # transient network failure: not cached, so the daemon retries next sweep
+        def boom(*a, **k):
+            raise TimeoutError("provider blip")
+        run.requests.get = boom
+        assert run._model_prices("m") is None
+        assert "m" not in run._PRICE_CACHE
+        # a successful lookup (model absent from list) IS cached as None -- no price, no retry
+        run.requests.get = lambda *a, **k: _Resp({"data": [{"id": "other-model"}]})
+        assert run._model_prices("m") is None
+        assert "m" in run._PRICE_CACHE
+    finally:
+        run.PROVIDER = real_provider
+
+
+def test_model_prices_stays_offline_under_local_provider():
+    # The repo invariant: PROVIDER=local never reaches a cloud pricing endpoint. Locking
+    # it down, since the test above now pins the provider and would otherwise be the only
+    # coverage of _model_prices.
+    real_provider = run.PROVIDER
+    run.PROVIDER = "local"
+    run._PRICE_CACHE.clear()
+
+    def fail(*a, **k):
+        raise AssertionError("PROVIDER=local must not hit the pricing endpoint")
+
+    run.requests.get = fail
+    try:
+        assert run._model_prices("m") is None
+    finally:
+        run.PROVIDER = real_provider
+        run._PRICE_CACHE.clear()
 
 
 def test_parse_max_tokens_rejects_non_numeric_and_defaults_blank():
