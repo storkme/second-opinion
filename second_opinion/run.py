@@ -100,6 +100,12 @@ FAIL_MARKER = "<!-- second-opinion-failed sha={sha} -->"
 # review at all. The merge-fallback path is the worst case, since it concatenates the K raw
 # passes with no dedup and is therefore strictly larger than the merged body would be.
 COMMENT_MAX = 65536
+# Filename for the untruncated diff dropped into the worktree when the prompt excerpt is
+# capped. Deliberately inside the checkout: pi's `read` tool is reliable there, whereas an
+# absolute path outside it depends on the tool grant (TOOLS=read alone could not reach it),
+# and a full diff the agent cannot open is just a quieter version of the bug this fixes.
+# `git worktree remove --force` deletes it with the worktree, so there is nothing to clean up.
+FULL_DIFF_NAME = ".second-opinion-full-diff.patch"
 
 MERGE_PROMPT = """\
 You are merging K independent reviews of the SAME pull-request diff into one comment.
@@ -839,21 +845,52 @@ def _post_failure_notice(pr: int, sha: str, dry_run: bool, checkout: bool = Fals
 
 def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_run: bool) -> ReviewOutcome:
     diff = _gh(["pr", "diff", str(pr)])
-    filtered, _files, truncated = rv.filter_diff(diff, _exclude_globs(), MAX_DIFF_CHARS)
+    globs = _exclude_globs()
+    filtered, files, truncated = rv.filter_diff(diff, globs, MAX_DIFF_CHARS)
     if not filtered.strip():
         log(f"#{pr}: empty filtered diff — skipping")
         return ReviewOutcome(False, False)
 
+    # When the excerpt is capped the rest of the change has to stay REACHABLE. filter_diff
+    # stops at the first chunk that overflows, and chunks arrive in git's path order, so a
+    # big generated artifact early in the alphabet can starve every source file behind it —
+    # observed on spaghettio#575, where the excerpt carried 1 of 16 files (1.7% of the diff)
+    # and the check still went green. The whole diff is already in hand here; only the
+    # prompt is capped. Write the untruncated (still glob-filtered) diff into the worktree
+    # and name it in the prompt, so what the excerpt drops is one `read` away instead of
+    # invisible.
+    dropped: list[str] = []
+    full_text = ""
+    if truncated:
+        full_text, all_files, _ = rv.filter_diff(diff, globs, len(diff) + 1)
+        seen = set(files)
+        dropped = [p for p in all_files if p not in seen]
+
     system = rv.system_prompt(PROJECT, _guidance())
+    _git(["fetch", "-q", "origin", f"refs/pull/{pr}/head"], check=False)
+    wt = os.path.join(tempfile.gettempdir(), f"second-opinion-pr{pr}")
+    full_diff_rel = FULL_DIFF_NAME if truncated else ""
 
     def user_turn(diff_text: str) -> str:
-        return (f"PR #{pr}: {title}\n\nThe full repository is checked out in your working "
+        turn = (f"PR #{pr}: {title}\n\nThe full repository is checked out in your working "
                 f"directory at the PR's head commit. Use your tools (read, grep via bash) "
                 f"to inspect callers, tests, and definitions as needed. The change to "
                 f"review is this diff:\n\n{diff_text}\n")
+        if not full_diff_rel:
+            return turn
+        shown = len(files)
+        listed = "".join(f"  - {p}\n" for p in dropped[:60])
+        if len(dropped) > 60:
+            listed += f"  - ... and {len(dropped) - 60} more\n"
+        turn += (
+            f"\nIMPORTANT — the diff above is TRUNCATED: it carries only {shown} of "
+            f"{shown + len(dropped)} changed files. The COMPLETE diff is in your working "
+            f"directory at `./{full_diff_rel}` (it is not part of the PR — it was placed "
+            f"there for you). READ IT before you conclude; treat the excerpt above as a "
+            f"starting point, not the change. Prioritise source files over generated "
+            f"artifacts. Files changed by this PR but absent from the excerpt:\n{listed}")
+        return turn
 
-    _git(["fetch", "-q", "origin", f"refs/pull/{pr}/head"], check=False)
-    wt = os.path.join(tempfile.gettempdir(), f"second-opinion-pr{pr}")
     _git(["worktree", "remove", "--force", wt], check=False)
     add = _git(["worktree", "add", "--detach", "--force", wt, sha], check=False)
     if add.returncode != 0:
@@ -864,6 +901,32 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         _annotate("error", f"#{pr}: worktree add failed @ {sha[:10]} — {detail} — no review produced")
         _post_failure_notice(pr, sha, dry_run, checkout=True)
         return ReviewOutcome(False, True)
+
+    if truncated:
+        # Loud, and specific about what was dropped. A count buried in the comment footer
+        # reads the same at 1-of-16 as at 15-of-16; the annotation names the files so
+        # partial coverage cannot be mistaken for full coverage in the checks UI.
+        pct = 100 * len(filtered) // max(1, len(full_text))
+        listed = ", ".join(dropped[:10]) + (f", +{len(dropped) - 10} more"
+                                            if len(dropped) > 10 else "")
+        log(f"#{pr}: diff truncated — excerpt has {len(files)}/{len(files) + len(dropped)} "
+            f"files ({pct}% of the filtered diff); full diff written to {FULL_DIFF_NAME}")
+        _annotate("warning",
+                  f"#{pr}: prompt excerpt covers {len(files)} of "
+                  f"{len(files) + len(dropped)} changed files ({pct}% of the filtered diff) "
+                  f"— full diff supplied on disk, but coverage of the remainder depends on "
+                  f"the agent reading it. Not in the excerpt: {listed}")
+        try:
+            with open(os.path.join(wt, FULL_DIFF_NAME), "w", encoding="utf-8") as fh:
+                fh.write(full_text)
+        except OSError as e:
+            # Non-fatal: the excerpt still yields a review. But the agent now has no way
+            # to reach the remainder, so say so rather than letting it pass as coverage —
+            # and clear the pointer, or the prompt sends it to read a file that isn't there.
+            full_diff_rel = ""
+            _annotate("warning",
+                      f"#{pr}: could not write the full diff for the agent "
+                      f"({' '.join(str(e).split())[:120]}) — review is limited to the excerpt")
 
     passes: list[str] = []
     degraded = False
@@ -939,7 +1002,11 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     # models), so label the total as an estimate regardless of whether a pass degraded.
     footer = _cost_footer(total_cost, total_tokens, estimated=True)
     if truncated:
-        footer += "\n\n*(diff truncated to fit context — coverage is partial)*"
+        # Name the numbers. "coverage is partial" reads identically at 1-of-16 and 15-of-16,
+        # and the reader has no way to tell which they got.
+        footer += (f"\n\n*(prompt excerpt covered {len(files)} of {len(files) + len(dropped)} "
+                   f"changed files; the full diff was supplied to the agent on disk. "
+                   f"Coverage of the remainder depends on it having read that.)*")
     marker = MARKER.format(sha=sha)
     shell = HEADER.format(marker=marker, pass_label=pass_label, model=model, body="")
     # Reserve in bytes, matching _clip_review_body's budget — the shell is not ASCII.

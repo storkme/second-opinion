@@ -396,6 +396,94 @@ def _restore_review_pr_deps(originals):
     run._gh, run._git, run.rv.shuffle_inputs = originals
 
 
+def _multifile_diff(n_files, chunk_chars):
+    """A diff of n_files, each ~chunk_chars, in git's path order."""
+    parts = []
+    for i in range(n_files):
+        path = f"src/f{i:02d}.rs"
+        body = "\n".join(["+x" * 20] * (chunk_chars // 41 + 1))
+        parts.append(f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+                     f"@@ -1 +1 @@\n{body}\n")
+    return "".join(parts)
+
+
+def _drive_review_pr(pr, diff, max_chars, make_worktree=True):
+    """Run review_pr against a stubbed world; return (prompt, annotations, worktree)."""
+    import shutil
+    real = (run.K, run.run_pass, run.merge_reviews, run.MAX_DIFF_CHARS, run.PROVIDER)
+    run.K, run.PROVIDER, run.MAX_DIFF_CHARS = 1, "openrouter", max_chars
+    real_deps = _stub_review_pr_deps()
+    run._gh = lambda args, timeout_s=60: diff
+    wt = os.path.join(tempfile.gettempdir(), f"second-opinion-pr{pr}")
+    shutil.rmtree(wt, ignore_errors=True)
+    if make_worktree:
+        os.makedirs(wt, exist_ok=True)
+    seen = {}
+    run.run_pass = lambda w, m, s, u, session_dir=None: (
+        seen.__setitem__("prompt", u), run.PassResult("finding", "ok"))[1]
+    ann = _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(pr, "t", "cafebabe00", "m", "m", dry_run=True)
+        return seen.get("prompt", ""), list(ann), wt
+    finally:
+        run.K, run.run_pass, run.merge_reviews, run.MAX_DIFF_CHARS, run.PROVIDER = real
+        _restore_review_pr_deps(real_deps)
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_truncated_diff_writes_the_full_diff_and_points_the_agent_at_it():
+    # filter_diff stops at the first chunk that overflows, so a big early file starves
+    # every file behind it (spaghettio#575: 1 of 16 files, 1.7%, green check). The excerpt
+    # may be capped, but the remainder must stay reachable.
+    import shutil
+    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    prompt, ann, wt = _drive_review_pr(4242, diff, max_chars=2500)
+    try:
+        path = os.path.join(wt, run.FULL_DIFF_NAME)
+        assert os.path.exists(path), "full diff was not written into the worktree"
+        full = open(path, encoding="utf-8").read()
+        # Everything the excerpt dropped is present in the on-disk copy.
+        for i in range(6):
+            assert f"src/f{i:02d}.rs" in full, i
+        assert len(full) > len(prompt), "on-disk diff should exceed the truncated excerpt"
+        # The agent is told it is truncated, where the rest is, and what is missing.
+        assert "TRUNCATED" in prompt
+        assert run.FULL_DIFF_NAME in prompt
+        assert "src/f05.rs" in prompt, "dropped files must be named in the prompt"
+        # ...and the operator sees it in the checks UI, with numbers, not just a vibe.
+        warn = [m for lvl, m in ann if lvl == "warning" and "changed files" in m]
+        assert warn, ann
+        assert "of 6 changed files" in warn[0], warn[0]
+    finally:
+        shutil.rmtree(wt, ignore_errors=True)
+
+
+def test_untruncated_diff_adds_no_file_and_no_truncation_note():
+    import shutil
+    diff = _multifile_diff(n_files=2, chunk_chars=200)
+    prompt, ann, wt = _drive_review_pr(4243, diff, max_chars=1_000_000)
+    try:
+        assert not os.path.exists(os.path.join(wt, run.FULL_DIFF_NAME))
+        assert "TRUNCATED" not in prompt and run.FULL_DIFF_NAME not in prompt
+        assert not [m for _l, m in ann if "changed files" in m], ann
+    finally:
+        shutil.rmtree(wt, ignore_errors=True)
+
+
+def test_failed_full_diff_write_does_not_point_the_agent_at_a_missing_file():
+    # If the write fails the pointer must be withdrawn — otherwise the prompt sends the
+    # agent to read a file that isn't there, which is a quieter version of the same bug.
+    diff = _multifile_diff(n_files=6, chunk_chars=2000)
+    prompt, ann, wt = _drive_review_pr(4244, diff, max_chars=2500, make_worktree=False)
+    assert not os.path.exists(os.path.join(wt, run.FULL_DIFF_NAME))
+    assert run.FULL_DIFF_NAME not in prompt, "prompt still points at an unwritten file"
+    assert "TRUNCATED" not in prompt
+    assert [m for lvl, m in ann if lvl == "warning" and "could not write the full diff" in m], ann
+
+
 def test_review_pr_parallel_passes_run_concurrently_and_keep_order():
     # All K passes must be in flight AT ONCE — the barrier times out loudly if any pass
     # waits on another (i.e. the loop silently went sequential, losing the wall-clock win
