@@ -739,15 +739,18 @@ def _clip_review_body(review_body: str, reserved: int, limit: int = COMMENT_MAX)
     room = limit - reserved
     notice = "\n\n*(review truncated to fit GitHub's comment size limit — see the run log)*"
     if room <= 0:
-        # Pathological: header+footer alone fill the cap. Nothing useful to salvage.
+        # Pathological: header+footer alone meet or exceed the cap, so the assembled
+        # comment is over-cap no matter what happens to the body. Returning "" does not
+        # rescue that — nothing here can — it just avoids making it worse. Unreachable
+        # from review_pr, where the shell and footer are ~380 bytes against a 65536 cap.
         return ""
     if _bytes(review_body) <= room:
         return review_body
     keep = room - _bytes(notice)
     if keep <= 0:
-        # `room` too small for even the notice. Unreachable from review_pr (the header and
-        # footer are hundreds of bytes against a 65536 cap), but the helper takes a general
-        # `limit`, so keep it correct in isolation: never return more than `room`.
+        # `room` is positive but too small for even the notice. Unreachable from review_pr
+        # (the header and footer are ~380 bytes against a 65536 cap), but the helper takes
+        # a general `limit`, so keep it correct in isolation: return at most `room` bytes.
         return _clip_utf8(notice.strip(), room)
     log(f"review body {_bytes(review_body)}B exceeds the comment cap — clipping to {keep}B")
     _annotate("warning",

@@ -232,7 +232,10 @@ def test_posted_comment_fits_the_cap_in_bytes_not_just_code_points():
         assert out.posted is True
         printed = buf.getvalue()
         start = printed.index("<!-- second-opinion sha=")
-        comment = printed[start:]
+        # The dry-run print wraps the body in "\n{body}\n"; production writes exactly
+        # `body` via --body-file. Strip the added newline so the assertion matches the
+        # real cap rather than rejecting a body one byte under it.
+        comment = printed[start:].rstrip("\n")
         assert len(comment.encode("utf-8")) <= run.COMMENT_MAX, len(comment.encode("utf-8"))
     finally:
         run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
