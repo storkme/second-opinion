@@ -760,9 +760,9 @@ def write_full_diff(fd: rv.FilteredDiff, wt: str, pr: int) -> str:
     """Drop the complete diff into the agent's working directory. Returns the filename to
     point at, or "" if it could not be written (callers must then stop claiming it exists).
 
-    Ordered missing-files-first, smallest-first: the file is larger than one read by
-    construction, so in git path order the first read returns what the excerpt already
-    carried. When nothing is wholly missing the order is left alone — the material the
+    Ordered missing-files-first, smallest-first: whenever the file needs paging (the
+    usual case — see _needs_paging) git path order would make the first read return what
+    the excerpt already carried. When nothing is wholly missing the order is left alone — the material the
     agent lacks is then the TAIL, and promoting anything would point it the wrong way."""
     ordered = rv.reorder_unseen_first(fd.full_text, fd.missing_files)
     shown = len(dict.fromkeys(fd.files))
@@ -774,9 +774,13 @@ def write_full_diff(fd: rv.FilteredDiff, wt: str, pr: int) -> str:
                      f"# smallest first: reading from the TOP gives you material the excerpt\n"
                      f"# lacked.\n")
     else:
+        tail_hint = ("# is the TAIL. Page DOWN to reach it.\n" if _needs_paging(fd)
+                     else "# is at the END of this file.\n")
+        # No "page down" when the whole file comes back in one read — the prompt says it
+        # fits, and a header telling it to page would contradict that in the same breath.
         lines.append("# The excerpt carried every changed file, but is cut short. Order here is\n"
                      "# unchanged, so the TOP repeats what you already saw — what you are missing\n"
-                     "# is the TAIL. Page DOWN to reach it.\n")
+                     + tail_hint)
     if _needs_paging(fd):
         lines.append("# This file is larger than a single read returns.\n")
     try:

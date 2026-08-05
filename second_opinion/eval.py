@@ -148,11 +148,13 @@ def review_diff(rec: dict, model: str) -> str:
     add = run._git(["worktree", "add", "--detach", "--force", wt, rec["target"]], check=False)
     if add.returncode != 0:
         raise RuntimeError(f"worktree add @ {rec['target'][:10]}: {add.stderr.strip()[:120]}")
-    if fd.truncated:
-        full_diff_rel = run.write_full_diff(fd, wt, rec["pr"])
-        log(f"#{rec['pr']}: diff truncated — excerpt {run.coverage_phrase(fd)}")
     passes: list[str] = []
     try:
+        # Inside the try, mirroring production: anything raising from here must still
+        # hit the finally that removes the worktree.
+        if fd.truncated:
+            full_diff_rel = run.write_full_diff(fd, wt, rec["pr"])
+            log(f"#{rec['pr']}: diff truncated — excerpt {run.coverage_phrase(fd)}")
         for i in range(run.K):
             diff_use = filtered if i == 0 else rv.shuffle_inputs(filtered, i)
             result = run.run_pass(wt, model, system, user_turn(diff_use))

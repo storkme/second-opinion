@@ -569,8 +569,11 @@ def test_single_file_clipped_mid_hunk_is_not_described_as_full_coverage():
         # the reorder is a no-op, so the TOP repeats the excerpt and the missing material
         # is the TAIL — pointing the agent at the top would be actively wrong.
         head = open(os.path.join(wt, run.FULL_DIFF_NAME), encoding="utf-8").read()[:700]
-        assert "is the TAIL" in head, head
-        assert "Page DOWN" in head, head
+        assert "is at the END of this file" in head, head
+        # This fixture fits in one read, so the header must NOT tell the agent to page —
+        # the prompt says it fits, and a "page down" here would contradict it outright.
+        assert "Page DOWN" not in head, head
+        assert "fits in a single read" in prompt, prompt[-300:]
         assert "ordered FIRST" not in head, head
         assert "1 of 1 changed file(s)" not in head, head
     finally:
