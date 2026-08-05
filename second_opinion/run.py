@@ -649,7 +649,7 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
         f"=== PASS {i+1} of {len(passes)} (independent) ===\n{p}"
         for i, p in enumerate(passes))
     prompt = MERGE_PROMPT.format(pr=pr, title=title, passes_block=passes_block)
-    failure = "returned no usable content"
+    failures = []
     for attempt in (1, 2):
         attempt_meta: dict = {}
         try:
@@ -660,9 +660,9 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
                 out = _chat(OPENROUTER_BASE, key, merge_model, prompt, attempt_meta)
         except Exception as e:  # noqa: BLE001 — transient HTTP failures retry like empties
             out = ""
-            failure = f"raised {type(e).__name__}: {str(e)[:120]}"
+            reason = f"raised {type(e).__name__}: {str(e)[:120]}"
         else:
-            failure = "returned no usable content"
+            reason = "returned no usable content"
         # A flaked attempt still bills for the tokens it burned (a reasoning-burn empty is
         # the *expensive* failure), so accumulate rather than overwrite: reporting only the
         # winning attempt would understate real spend on exactly the runs that cost most.
@@ -671,9 +671,19 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
                 meta[field] = meta.get(field, 0) + value
         if out:
             return out
-        log(f"merge ({MERGE_PROVIDER}/{merge_model}) attempt {attempt}/2 {failure}")
+        failures.append(reason)
+        log(f"merge ({MERGE_PROVIDER}/{merge_model}) attempt {attempt}/2 {reason}")
+    # Report BOTH reasons, not just the last. The attempts can fail differently, and the
+    # distinction is the operator-actionable part: a 402 on attempt 1 followed by an empty
+    # 200 on attempt 2 is credits exhaustion — a persistent condition that will recur every
+    # sweep — but collapsing to the last reason would file it under "the model flaked".
+    detail = "; ".join(f"attempt {i+1} {r}" for i, r in enumerate(failures))
     _annotate("warning",
-              f"union merge failed twice ({failure}) — posting {len(passes)} raw passes unmerged")
+              f"union merge failed twice ({detail}) — posting {len(passes)} raw passes unmerged")
+    # Tell the caller the passes were never unioned, so the posted header can say so rather
+    # than claiming a "union ×K" that did not happen.
+    if meta is not None:
+        meta["merged"] = False
     parts = [f"*(union merge unavailable — the {len(passes)} independent passes follow "
              "unmerged; findings may repeat or disagree between passes)*"]
     parts += [f"### Pass {i+1} of {len(passes)}\n\n{p}" for i, p in enumerate(passes)]
@@ -841,6 +851,7 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         return ReviewOutcome(False, True)
 
     k = len(passes)
+    merged = True
     if k == 1:
         review_body = passes[0]
     else:
@@ -848,7 +859,13 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         review_body = merge_reviews(pr, title, passes, merge_model, meta=mm)
         total_cost += mm.get("cost", 0.0)
         total_tokens += mm.get("tokens", 0)
-    pass_label = "single pass" if k == 1 else f"union ×{k}"
+        merged = mm.get("merged", True)
+    if k == 1:
+        pass_label = "single pass"
+    else:
+        # Don't claim a union that didn't happen — on the merge-fallback path the passes
+        # are posted raw, so the header says so instead of advertising "union ×K".
+        pass_label = f"union ×{k}" if merged else f"×{k} unmerged"
     body = HEADER.format(marker=MARKER.format(sha=sha), pass_label=pass_label,
                          model=model, body=review_body)
     # Pass-derived costs are list-price estimates (pi does not price custom OpenRouter

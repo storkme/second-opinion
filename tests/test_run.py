@@ -87,6 +87,77 @@ def test_merge_reviews_falls_back_to_raw_passes_after_two_failures():
         run._annotate = _REAL_ANNOTATE
 
 
+def test_merge_reviews_annotation_reports_both_attempt_failures():
+    # The attempts can fail differently, and the difference is the operator-actionable
+    # part: a 402 then an empty 200 is credits exhaustion — a persistent condition that
+    # recurs every sweep — not "the model flaked". Collapsing to the last reason hides it.
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("402 requires more credits")
+        return _Resp({"choices": []})
+
+    run.requests.post = post
+    ann = _capture_annotations()
+    try:
+        out = run.merge_reviews(1, "t", ["finding a", "finding b"])
+        assert "finding a" in out
+        msg = ann[0][1]
+        assert "attempt 1 raised RuntimeError" in msg and "402" in msg, msg
+        assert "attempt 2 returned no usable content" in msg, msg
+    finally:
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_merge_reviews_flags_the_unmerged_fallback_to_the_caller():
+    # The posted header must not advertise a "union ×K" that never happened.
+    run.requests.post = lambda *a, **k: _Resp({"choices": []})
+    ann = _capture_annotations()
+    try:
+        meta: dict = {}
+        run.merge_reviews(1, "t", ["a", "b"], meta=meta)
+        assert meta.get("merged") is False, meta
+    finally:
+        run._annotate = _REAL_ANNOTATE
+
+    # ...and a successful merge leaves the flag alone, so the caller's default holds.
+    run.requests.post = lambda *a, **k: _Resp(
+        {"choices": [{"message": {"content": "merged"}}]})
+    meta = {}
+    assert run.merge_reviews(1, "t", ["a", "b"], meta=meta) == "merged"
+    assert meta.get("merged", True) is True, meta
+
+
+def test_review_pr_header_says_unmerged_when_the_merge_fell_back():
+    import contextlib
+    import io
+    real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
+    run.K = 2
+    real_deps = _stub_review_pr_deps()
+
+    def fallback_merge(pr, title, passes, merge_model=None, meta=None):
+        if meta is not None:
+            meta["merged"] = False
+        return "RAW PASSES"
+
+    run.merge_reviews = fallback_merge
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult("text", "ok")
+    _capture_annotations()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+        body = buf.getvalue()
+        assert "×2 unmerged" in body, body
+        assert "union ×2" not in body, body
+    finally:
+        run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+        _restore_review_pr_deps(real_deps)
+        run._annotate = _REAL_ANNOTATE
+
+
 def test_merge_reviews_accumulates_cost_across_a_retried_attempt():
     # The expensive failure mode is a reasoning-burn empty: it bills full freight and
     # returns nothing. Reporting only the winning attempt would understate spend on
@@ -224,11 +295,19 @@ def test_review_pr_worktree_add_failure_is_degraded_and_annotates():
 
 
 def _stub_review_pr_deps():
-    """Common stubs for driving review_pr past the diff fetch and worktree add."""
+    """Common stubs for driving review_pr past the diff fetch and worktree add. Returns the
+    originals so the caller can restore them — leaving these swapped is latent cross-test
+    pollution (it already broke the run_pass tests once during this file's development)."""
+    originals = (run._gh, run._git, run.rv.shuffle_inputs)
     run._gh = lambda args, timeout_s=60: (
         "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n")
     run._git = lambda args, check=True: FakeProc(0)
     run.rv.shuffle_inputs = lambda d, i: f"<<{i}>>"
+    return originals
+
+
+def _restore_review_pr_deps(originals):
+    run._gh, run._git, run.rv.shuffle_inputs = originals
 
 
 def test_review_pr_parallel_passes_run_concurrently_and_keep_order():
@@ -240,7 +319,7 @@ def test_review_pr_parallel_passes_run_concurrently_and_keep_order():
     barrier = threading.Barrier(3, timeout=10)
     real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
     run.K = 3
-    _stub_review_pr_deps()
+    real_deps = _stub_review_pr_deps()
     merged = {}
 
     def fake_merge(pr, title, passes, merge_model=None, meta=None):
@@ -264,6 +343,7 @@ def test_review_pr_parallel_passes_run_concurrently_and_keep_order():
         assert merged["passes"] == ["pass-0", "pass-2"]  # index order kept, empty dropped
     finally:
         run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+        _restore_review_pr_deps(real_deps)
         run._annotate = _REAL_ANNOTATE
 
 
@@ -273,7 +353,7 @@ def test_review_pr_parallel_passes_get_distinct_session_dirs():
     # pass), double-counting cost. Each pass must get its own subdir under PI_SESSION_DIR.
     real_k, real_pass, real_merge = run.K, run.run_pass, run.merge_reviews
     run.K = 3
-    _stub_review_pr_deps()
+    real_deps = _stub_review_pr_deps()
     run.merge_reviews = lambda pr, title, passes, merge_model=None, meta=None: "MERGED"
     seen = []
 
@@ -294,6 +374,7 @@ def test_review_pr_parallel_passes_get_distinct_session_dirs():
         finally:
             os.environ.pop("PI_SESSION_DIR", None)
             run.K, run.run_pass, run.merge_reviews = real_k, real_pass, real_merge
+            _restore_review_pr_deps(real_deps)
             run._annotate = _REAL_ANNOTATE
 
 
