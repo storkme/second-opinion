@@ -70,6 +70,9 @@ See [`examples/second-opinion.yml`](examples/second-opinion.yml) for the fuller 
 | `tools` | `read,bash` | agent tool grant; set `read` to drop shell (see Security) |
 | `reasoning` | `true` | set `false` for a non-reasoning `model` |
 | `fail-on-degraded` | `true` | fail the check when a pass degrades and posts no review ([below](#degraded-passes-fail-the-check)) |
+| `loki-url` | — (off) | optional [monitoring](#monitoring-optional): Loki push endpoint receiving one JSON event per review/sweep |
+| `loki-user` | — | basic-auth user for `loki-url` (Grafana Cloud: the numeric Loki instance id) |
+| `loki-token` | — | basic-auth password for `loki-url` — scope it to `logs:write` only (see Security) |
 
 ## Quickstart — self-hosted daemon
 
@@ -188,6 +191,41 @@ posted) — set `FAIL_ON_DEGRADED=false` if a wrapper script needs a guaranteed-
   the union is a recall lever for the weaker local model. The `K>1` merge runs locally too,
   so nothing leaves the box.
 
+## Monitoring (optional)
+
+The reviewer runs autonomously, so without monitoring you can't see whether it's working:
+runtime, cost, how often it degrades, how many review rounds a PR accumulates. When
+`LOKI_URL` is set, every review and sweep pushes **one structured JSON event** to a
+[Loki](https://grafana.com/oss/loki/) endpoint — Grafana Cloud or self-hosted, the push
+API is identical, so moving off the cloud later is a URL + credential swap.
+
+```jsonc
+// event="review", labels: service/delivery/repo/event/outcome
+{"event": "review", "pr": 574, "sha": "…", "outcome": "posted", "model": "z-ai/glm-5.2",
+ "provider": "openrouter", "k": 1, "pass_statuses": "ok", "passes_ok": 1,
+ "passes_degraded": 0, "merged": true, "tokens": 184000, "cost_usd": 0.031,
+ "diff_chars": 41200, "diff_truncated": false, "duration_s": 412.3}
+```
+
+- **Setup (Grafana Cloud):** from your stack's Loki details page take the push URL
+  (`https://logs-prod-XXX.grafana.net/loki/api/v1/push`) and the numeric instance id, and
+  create an access-policy token scoped to **`logs:write` only**. Set them as `loki-url` /
+  `loki-user` / `loki-token` (Action inputs — org-level secrets cover multiple repos) or
+  `LOKI_URL` / `LOKI_USER` / `LOKI_TOKEN` (daemon `.env`). Self-hosted Loki without auth
+  needs only the URL.
+- **Dashboard:** import [`examples/grafana-dashboard.json`](examples/grafana-dashboard.json)
+  and point it at your Loki data source — reviews by outcome, cost/tokens per repo,
+  duration p50/p95, review rounds per PR, daemon liveness, and a raw event log.
+- **Contract:** off by default (no `LOKI_URL` = no network call, so `PROVIDER=local`
+  stays fully offline), and strictly **fail-soft** — the push happens *after* the review
+  is posted, and a failed push is one log line, never a degraded or failed review. The
+  flip side: a run that crashes before the emit point sends no event at all — that's
+  exactly the case the [`fail-on-degraded`](#degraded-passes-fail-the-check) tripwire
+  turns red in CI, so the two mechanisms cover each other.
+- **What it can't tell you:** that the reviews are *good*. This is runtime telemetry
+  (it ran, it cost X, it didn't malfunction); review quality is what
+  [`second-opinion-eval`](#measuring-recall-eval) measures.
+
 ## Security
 
 The agent runs `pi` with **`read,bash`** tools inside the container, which holds your
@@ -204,6 +242,11 @@ exfiltrate secrets. So:
 - `run.py` strips `GITHUB_TOKEN`/`GH_TOKEN` from the pi subprocess as defense-in-depth, and
   `providers.py` writes `~/.pi/agent/models.json` with mode `600`. The OpenRouter key still
   lives in that file in cleartext (pi reads it from there) — use a **low-limit key**.
+- **The Loki credential is one more secret in the container** (when monitoring is enabled).
+  Scope it to `logs:write` **only** — then the worst a compromised container can do with it
+  is push garbage log lines, not read your metrics or touch dashboards. It gets the same
+  defense-in-depth as the other secrets: stripped from the pi subprocess env (only the
+  parent pushes events) and scrubbed from persisted transcripts.
 - **Session transcripts are on disk and are your responsibility.** Every pass writes a JSONL
   transcript (a throwaway temp dir by default, or `PI_SESSION_DIR` when set). Persisted
   transcripts are **auto-redacted** — the `OPENROUTER_API_KEY` value, any `sk-or-v1-…`

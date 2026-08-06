@@ -5,6 +5,27 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Added
+- **Optional runtime monitoring via Loki** (`loki-url` / `loki-user` / `loki-token` action
+  inputs; env `LOKI_URL` / `LOKI_USER` / `LOKI_TOKEN`). The reviewer runs autonomously, so
+  runtime, cost, degraded-rate, and review rounds per PR were invisible without reading
+  every run log. When configured, one structured JSON event per review (outcome, per-pass
+  statuses, tokens, ≈cost, diff size/truncation, duration) and per sweep (candidates,
+  reviewed, duration — the daemon's liveness signal, including "llama-server unreachable")
+  is pushed to a Loki endpoint — Grafana Cloud or self-hosted, same API. Push rather than
+  scrape because the Action delivery is an ephemeral job nothing can scrape; both
+  deliveries instrument once in `run.py`. **Off by default** (no `LOKI_URL` = no network
+  call, so `PROVIDER=local` stays fully offline) and **strictly fail-soft**: the event is
+  emitted after the review is posted, and a failed push is one log line, never a degraded
+  or failed review; `--dry-run` emits nothing. The Loki token gets the same treatment as
+  the other secrets — stripped from the pi subprocess env, scrubbed from persisted
+  transcripts; scope it to `logs:write` only (documented in README Security). An
+  importable dashboard ships as `examples/grafana-dashboard.json`: reviews by outcome,
+  cost/tokens per repo, duration p50/p95, review rounds per PR, sweep liveness, raw
+  events.
+
 ## [1.6.0] - 2026-08-05
 
 ### Added

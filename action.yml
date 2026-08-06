@@ -98,6 +98,25 @@ inputs:
       the old always-green behavior."
     required: false
     default: "true"
+  loki-url:
+    description: "Optional monitoring: a Loki push endpoint (e.g. a Grafana Cloud
+      stack's https://logs-prod-XXX.grafana.net/loki/api/v1/push) that receives one
+      structured JSON event per review/sweep — runtime, tokens, cost, outcome. Empty
+      (default) disables metrics entirely; no network call is made. Fail-soft: a failed
+      push never degrades or fails the review."
+    required: false
+    default: ""
+  loki-user:
+    description: "Basic-auth user for loki-url — on Grafana Cloud, the numeric Loki
+      instance id. Leave empty for an unauthenticated (self-hosted) Loki."
+    required: false
+    default: ""
+  loki-token:
+    description: "Basic-auth password for loki-url — on Grafana Cloud, an access-policy
+      token. Scope it to logs:write ONLY: the container also holds your other secrets,
+      and a write-only token bounds the loss to garbage log lines (see README Security)."
+    required: false
+    default: ""
 
 runs:
   using: "docker"
@@ -124,3 +143,6 @@ runs:
     TOOLS: ${{ inputs.tools }}
     PI_REASONING: ${{ inputs.reasoning }}
     FAIL_ON_DEGRADED: ${{ inputs.fail-on-degraded }}
+    LOKI_URL: ${{ inputs.loki-url }}
+    LOKI_USER: ${{ inputs.loki-user }}
+    LOKI_TOKEN: ${{ inputs.loki-token }}
