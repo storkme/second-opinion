@@ -25,6 +25,7 @@
         "datasource": { "type": "loki", "uid": "${datasource}" },
         "query": "label_values({service=\"second-opinion\"}, repo)",
         "refresh": 2,
+        "allValue": ".*",
         "multi": true,
         "includeAll": true,
         "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
