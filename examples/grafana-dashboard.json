@@ -268,7 +268,7 @@
       "id": 10,
       "type": "timeseries",
       "title": "Sweeps (daemon liveness)",
-      "description": "One event per daemon sweep (delivery=daemon only — Action runs also emit sweep events, and unscoped they would paper over a real gap in the daemon's cadence). A gap here means the daemon is down or wedged; outcome=skipped means the local llama-server was unreachable; outcome=error means sweeps are running but throwing.",
+      "description": "One event per daemon sweep (delivery=daemon only — Action runs also emit sweep events, and unscoped they would paper over a real gap in the daemon's cadence). A gap here means the daemon is down or wedged. Outcomes: ok = healthy sweep; silent_failure = sweep ran but ≥1 review degraded/errored with nothing posted; skipped = local llama-server unreachable; error = sweeps running but throwing before completing.",
       "datasource": { "type": "loki", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
       "targets": [

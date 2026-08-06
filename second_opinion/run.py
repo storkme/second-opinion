@@ -1467,10 +1467,12 @@ def sweep(args: argparse.Namespace) -> bool:
                     "error": " ".join(str(e).split())[:200],
                     "duration_s": round(time.monotonic() - pr_t0, 1)})
     if not args.dry_run:
-        # The skip counts reconcile candidates vs reviewed: drafts and already-reviewed
-        # heads never reach review_pr (no review event), and per-PR skip events here
-        # would re-fire for every open PR on every daemon sweep — counts carry the same
-        # information without flooding the review stream.
+        # The skip counts cover the PRs that never reach review_pr (drafts,
+        # already-reviewed heads — no review event; per-PR skip events for them would
+        # re-fire for every open PR on every daemon sweep). The remaining residual
+        # (candidates - reviewed - skipped_*) equals this sweep's NON-POSTED review
+        # events (skipped/degraded/error), which do emit per-PR — the reconciliation
+        # needs both streams, not these counters alone.
         metrics.emit_event(
             "sweep",
             {"repo": REPO, "outcome": "silent_failure" if silent_failure else "ok"},
@@ -1530,7 +1532,9 @@ def main() -> None:
             # write_models_json) would otherwise leave a liveness-panel gap
             # indistinguishable from a dead daemon — "up but erroring" must read
             # differently from "gone". Fail-soft like every emit, so a metrics
-            # outage can't kill the daemon either.
+            # outage can't kill the daemon either. Intentionally count-less: this
+            # handler can't see sweep()'s partial counters, and any per-PR review
+            # events the sweep emitted before dying already carry its story.
             if not args.dry_run:
                 metrics.emit_event("sweep", {"repo": REPO, "outcome": "error"},
                                    {"error": " ".join(str(e).split())[:200]})
