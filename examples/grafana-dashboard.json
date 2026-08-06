@@ -42,7 +42,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(count_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"$repo\"}[$__range]))"
+          "expr": "sum(count_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"${repo:regex}\"}[$__range]))"
         }
       ],
       "options": {
@@ -70,7 +70,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(count_over_time({service=\"second-opinion\", event=\"review\", outcome=~\"degraded|error\", repo=~\"$repo\"}[$__range]))"
+          "expr": "sum(count_over_time({service=\"second-opinion\", event=\"review\", outcome=~\"degraded|error\", repo=~\"${repo:regex}\"}[$__range]))"
         }
       ],
       "options": {
@@ -104,7 +104,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap cost_usd | __error__=\"\" [$__range]))"
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap cost_usd | __error__=\"\" [$__range]))"
         }
       ],
       "options": {
@@ -133,7 +133,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap tokens | __error__=\"\" [$__range]))"
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__range]))"
         }
       ],
       "options": {
@@ -161,7 +161,7 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"$repo\"}[$__auto]))",
+          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"}[$__auto]))",
           "legendFormat": "{{outcome}}"
         }
       ],
@@ -184,7 +184,7 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "sum by (repo) (sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap cost_usd | __error__=\"\" [$__auto]))",
+          "expr": "sum by (repo) (sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap cost_usd | __error__=\"\" [$__auto]))",
           "legendFormat": "{{repo}}"
         }
       ],
@@ -207,13 +207,13 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "quantile_over_time(0.50, {service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap duration_s | __error__=\"\" [$__auto]) by ()",
+          "expr": "quantile_over_time(0.50, {service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap duration_s | __error__=\"\" [$__auto]) by ()",
           "legendFormat": "p50"
         },
         {
           "refId": "B",
           "queryType": "range",
-          "expr": "quantile_over_time(0.95, {service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap duration_s | __error__=\"\" [$__auto]) by ()",
+          "expr": "quantile_over_time(0.95, {service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap duration_s | __error__=\"\" [$__auto]) by ()",
           "legendFormat": "p95"
         }
       ],
@@ -235,7 +235,7 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "sum by (repo) (sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap tokens | __error__=\"\" [$__auto]))",
+          "expr": "sum by (repo) (sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__auto]))",
           "legendFormat": "{{repo}}"
         }
       ],
@@ -258,7 +258,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "topk(25, sum by (repo, pr) (count_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"$repo\"} | json [$__range])))"
+          "expr": "topk(25, sum by (repo, pr) (count_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"${repo:regex}\"} | json [$__range])))"
         }
       ],
       "transformations": [{ "id": "labelsToFields", "options": {} }],
@@ -275,7 +275,7 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"sweep\", delivery=\"daemon\", repo=~\"$repo\"}[$__auto]))",
+          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"sweep\", delivery=\"daemon\", repo=~\"${repo:regex}\"}[$__auto]))",
           "legendFormat": "{{outcome}}"
         }
       ],
@@ -299,7 +299,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "topk(25, sum by (repo, pr, pass, status) (max_over_time({service=\"second-opinion\", event=\"pass\", outcome!=\"ok\", repo=~\"$repo\"} | json | unwrap tokens | __error__=\"\" [$__range])))"
+          "expr": "topk(25, sum by (repo, pr, pass, status) (max_over_time({service=\"second-opinion\", event=\"pass\", outcome!=\"ok\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__range])))"
         }
       ],
       "transformations": [{ "id": "labelsToFields", "options": {} }],
@@ -319,13 +319,13 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "quantile_over_time(0.50, {service=\"second-opinion\", event=\"pass\", repo=~\"$repo\"} | json | unwrap elapsed_s | __error__=\"\" [$__auto]) by ()",
+          "expr": "quantile_over_time(0.50, {service=\"second-opinion\", event=\"pass\", repo=~\"${repo:regex}\"} | json | unwrap elapsed_s | __error__=\"\" [$__auto]) by ()",
           "legendFormat": "p50"
         },
         {
           "refId": "B",
           "queryType": "range",
-          "expr": "quantile_over_time(0.95, {service=\"second-opinion\", event=\"pass\", repo=~\"$repo\"} | json | unwrap elapsed_s | __error__=\"\" [$__auto]) by ()",
+          "expr": "quantile_over_time(0.95, {service=\"second-opinion\", event=\"pass\", repo=~\"${repo:regex}\"} | json | unwrap elapsed_s | __error__=\"\" [$__auto]) by ()",
           "legendFormat": "p95"
         }
       ],
@@ -348,7 +348,7 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"merge\", repo=~\"$repo\"}[$__auto]))",
+          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"merge\", repo=~\"${repo:regex}\"}[$__auto]))",
           "legendFormat": "{{outcome}}"
         }
       ],
@@ -371,7 +371,7 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "{service=\"second-opinion\", repo=~\"$repo\"}"
+          "expr": "{service=\"second-opinion\", repo=~\"${repo:regex}\"}"
         }
       ],
       "options": {
