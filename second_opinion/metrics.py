@@ -35,6 +35,11 @@ import requests
 LOKI_URL = os.environ.get("LOKI_URL", "").strip()
 LOKI_USER = os.environ.get("LOKI_USER", "").strip()
 LOKI_TOKEN = os.environ.get("LOKI_TOKEN", "").strip()
+# (connect, read): a scalar would let a black-holed endpoint (connection accepted,
+# never answered) hold every push for the full read budget — N+1 events per daemon
+# sweep, so the monitoring would throttle the loop it monitors. Connection-refused
+# already fails fast; this bounds the hang path's connect phase too.
+CONNECT_TIMEOUT_S = 3.05
 PUSH_TIMEOUT_S = 10
 
 # "action" | "daemon" | "oneshot" — set by run.main() once the run mode is known.
@@ -57,7 +62,8 @@ def emit_event(event: str, labels: dict, fields: dict) -> None:
         payload = {"streams": [{"stream": stream,
                                 "values": [[str(time.time_ns()), line]]}]}
         auth = (LOKI_USER, LOKI_TOKEN) if (LOKI_USER or LOKI_TOKEN) else None
-        resp = requests.post(LOKI_URL, json=payload, auth=auth, timeout=PUSH_TIMEOUT_S)
+        resp = requests.post(LOKI_URL, json=payload, auth=auth,
+                             timeout=(CONNECT_TIMEOUT_S, PUSH_TIMEOUT_S))
         resp.raise_for_status()
     except Exception as e:  # noqa: BLE001 — fail-soft is the module's contract
         print(f"[{time.strftime('%H:%M:%S')}] metrics: push failed "
