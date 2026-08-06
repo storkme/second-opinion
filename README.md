@@ -73,6 +73,9 @@ See [`examples/second-opinion.yml`](examples/second-opinion.yml) for the fuller 
 | `loki-url` | — (off) | optional [monitoring](#monitoring-optional): Loki push endpoint receiving JSON events per review/pass/sweep |
 | `loki-user` | — | basic-auth user for `loki-url` (Grafana Cloud: the numeric Loki instance id) |
 | `loki-token` | — | basic-auth password for `loki-url` — scope it to `logs:write` only (see Security) |
+| `otlp-endpoint` | — (off) | optional [tracing](#tracing-optional): OTLP/HTTP endpoint receiving one trace per review |
+| `otlp-user` | — | basic-auth user (Grafana Cloud: the numeric **instance** id — usually *not* the same as `loki-user`) |
+| `otlp-token` | — | basic-auth password — scope it to `traces:write` only (see Security) |
 
 ## Quickstart — self-hosted daemon
 
@@ -257,6 +260,44 @@ present, `0` when healthy): a mistyped `max-pass-tokens` disables that ceiling a
 - **What it can't tell you:** that the reviews are *good*. This is runtime telemetry
   (it ran, it cost X, it didn't malfunction); review quality is what
   [`second-opinion-eval`](#measuring-recall-eval) measures.
+
+## Tracing (optional)
+
+Monitoring tells you a review took 197s. Tracing tells you **where the 197s went**. Set
+`OTLP_ENDPOINT` (plus `OTLP_USER` / `OTLP_TOKEN`) and each review exports one OTLP trace:
+
+```
+review  (repo, pr, sha, outcome)
+├── pass 1/3  (status, tokens, cost_usd)
+│   ├── llm turn   ← model inference, with gen_ai.usage.* per turn
+│   ├── tool bash
+│   ├── llm turn
+│   └── …
+├── pass 2/3  …   ← at K>1 on OpenRouter these run CONCURRENTLY, and the
+├── pass 3/3  …     waterfall shows the overlap (and any straggler) directly
+└── merge     (attempts, merged, failures)
+```
+
+Tool calls come from **pi's JSONL session transcript**, parsed after the pass — pi has no
+OTLP of its own, so there is nothing to configure on its side. That also means inner spans
+need a transcript: they appear whenever one exists (always, since a throwaway dir is used
+when `session-dir` is unset), and a review whose transcript was truncated by a killed pass
+still gets its `review`/`pass` spans, just without the inner detail.
+
+What it's actually for, from a measured run (`second-opinion#36`, 194.3s):
+
+- **8 model turns, 12 tool calls — and 0.06s of tool execution.** Tool spans show *what the
+  agent looked at*; they are not where the time is.
+- **Latency tracks output tokens, not input** — ~9,250 output tokens over 194s, about
+  48 tok/s. One turn ingested 25k input tokens and took 16s because it emitted only 821.
+  So the lever on review latency is what the model *writes* (for a reasoning model, largely
+  thinking tokens) or the model itself — not the size of the diff.
+
+Same contract as the Loki events: **off by default** (no `OTLP_ENDPOINT` = no network call,
+so `PROVIDER=local` stays fully offline), exported *after* the review is posted, and
+strictly **fail-soft** — a failed export is one log line, never a degraded review. No
+OpenTelemetry SDK is pulled in; the exporter is OTLP/JSON over the `requests` dependency
+the project already has.
 
 ## Security
 

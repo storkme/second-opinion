@@ -53,6 +53,26 @@ All notable changes to this project are documented here. The format follows
   `--watch` daemon could run for weeks believing it had a spend ceiling it did not have.
   `config_degraded` is always present, even at `0`, so an alert need not distinguish "no
   problems" from "field absent" — Loki's `| json` yields no value at all for a missing field.
+- **Optional OTLP tracing** (`otlp-endpoint` / `otlp-user` / `otlp-token`; env
+  `OTLP_ENDPOINT` / `OTLP_USER` / `OTLP_TOKEN`, `tracing.py`). The Loki events say a review
+  took 197s; they cannot say where the 197s went, because a review is a tree — K passes,
+  each a back-and-forth of model turns and tool calls, then a merge. Each review now
+  exports one trace shaped `review` › `pass` › `llm turn`/`tool` › `merge`, so at `K>1` the
+  concurrent passes and any straggler are visible as overlap in a waterfall.
+  **Tool calls come from pi's JSONL session transcript**, parsed after the pass completes —
+  pi has no OTLP of its own, so nothing needs configuring on its side, and a transcript
+  truncated by a killed pass simply loses the inner spans rather than the trace.
+  What it surfaced immediately, measured on this repo's own #36 review (194.3s): **12 tool
+  calls totalling 0.06s**, and latency tracking *output* tokens at ~48 tok/s — one turn took
+  16s on 25k input tokens because it emitted only 821. The lever on review latency is what
+  the model writes, not the size of the diff, which is not a conclusion the per-review
+  numbers could reach. **No OpenTelemetry SDK**: the exporter is hand-rolled OTLP/JSON over
+  the existing `requests` dependency, since every span is built retroactively from
+  timestamps already recorded — there is no live context for an SDK to propagate. Same
+  contracts as the Loki emitter: off unless configured (no endpoint = no network call, so
+  `PROVIDER=local` stays fully offline), exported after the review is posted, never raises,
+  and `OTLP_TOKEN` is stripped from the pi subprocess and scrubbed from transcripts like the
+  other secrets.
 - **Three dashboard panels** in `examples/grafana-dashboard.json`: *Degraded passes — what
   they burned* (every non-`ok` pass ranked by tokens spent before it stopped, which
   distinguishes "the ceiling would have helped" from "it failed early anyway"), *Pass

@@ -118,6 +118,25 @@ inputs:
       and a write-only token bounds the loss to garbage log lines (see README Security)."
     required: false
     default: ""
+  otlp-endpoint:
+    description: "Optional tracing: an OTLP/HTTP endpoint (e.g. a Grafana Cloud stack's
+      https://otlp-gateway-prod-XX.grafana.net/otlp) receiving one trace per review —
+      review > pass > model turn / tool call > merge. Answers 'where did the time go',
+      which the Loki events cannot. '/v1/traces' is appended. Empty (default) disables
+      tracing entirely; no network call is made. Fail-soft, like the Loki events."
+    required: false
+    default: ""
+  otlp-user:
+    description: "Basic-auth user for otlp-endpoint — on Grafana Cloud, the numeric
+      INSTANCE id from the OTLP page. NOTE this is usually a DIFFERENT number from
+      loki-user; copying the Loki one here is the easy mistake, and it fails as a 401."
+    required: false
+    default: ""
+  otlp-token:
+    description: "Basic-auth password for otlp-endpoint — an access-policy token scoped
+      to traces:write ONLY, for the same reason as loki-token (see README Security)."
+    required: false
+    default: ""
 
 runs:
   using: "docker"
@@ -147,3 +166,6 @@ runs:
     LOKI_URL: ${{ inputs.loki-url }}
     LOKI_USER: ${{ inputs.loki-user }}
     LOKI_TOKEN: ${{ inputs.loki-token }}
+    OTLP_ENDPOINT: ${{ inputs.otlp-endpoint }}
+    OTLP_USER: ${{ inputs.otlp-user }}
+    OTLP_TOKEN: ${{ inputs.otlp-token }}

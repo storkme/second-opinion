@@ -78,6 +78,11 @@ second_opinion/
                    # strictly fail-soft (emit_event/emit_events never raise); emitted AFTER
                    # the post. emit_events batches a review + its K pass events into ONE
                    # request, so per-pass detail costs no extra round trip or timeout.
+  tracing.py       # OPTIONAL tracing: one OTLP/JSON trace per review, hand-rolled over
+                   # requests (no OTel SDK). review > pass > llm turn / tool call > merge.
+                   # Inner spans are reconstructed from pi's JSONL transcript, which is the
+                   # only way to see tool calls -- pi has no OTLP of its own. No-op unless
+                   # OTLP_ENDPOINT is set; never raises; exported AFTER the post.
   bootstrap.py     # OFFLINE tool: mine a repo's PR-review history → draft a review-guidance.md
                    # (one strong-model synthesis call; reuses run._chat + DEFAULT_MODEL). Mines
                    # the pulls API (reviewer findings), not the issues stream it posts to —
@@ -138,6 +143,8 @@ agentic path never used.
 | `FAIL_ON_DEGRADED` | `true` | exit `2` when a degraded pass (timeout / non-zero pi exit / empty output / failed head-checkout) posts no review; `false` restores always-green |
 | `LOKI_URL` | — (off) | optional monitoring: Loki push endpoint receiving JSON events per review / per pass / per sweep (`metrics.py`). Unset = no metrics, no network call — `PROVIDER=local` stays fully offline. Fail-soft: a failed push never degrades a review. |
 | `LOKI_USER` / `LOKI_TOKEN` | — | basic auth for `LOKI_URL` (Grafana Cloud: instance id / a `logs:write`-scoped token). The token is stripped from the pi subprocess env and scrubbed from persisted transcripts, like the other secrets. |
+| `OTLP_ENDPOINT` | — (off) | optional tracing: OTLP/HTTP endpoint receiving one trace per review — `review` › `pass` › `llm turn`/`tool` › `merge` (`tracing.py`). Answers "where did the time go", which the Loki events cannot: a measured review was **generation-bound at ~48 tok/s**, with tool calls totalling 0.06s of 194s. Unset = no tracing, no network call. |
+| `OTLP_USER` / `OTLP_TOKEN` | — | basic auth for `OTLP_ENDPOINT` (Grafana Cloud: the numeric **instance** id — usually **not** the same number as `LOKI_USER` — and a `traces:write`-scoped token). Stripped from the pi subprocess and scrubbed from transcripts like the other secrets. |
 | `REPO_DIR` | cwd | the target repo checkout |
 
 `--watch` / `--interval N` are CLI flags (daemon mode); `--pr N`, `--dry-run`, `--force`
