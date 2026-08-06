@@ -40,3 +40,13 @@ jobs:
           # timeout only raises the bill. Off by default; set it once you know your
           # repo's normal range, and an over-ceiling pass reports as `runaway`.
           # max-pass-tokens: "5000000"
+          # Optional runtime monitoring: one JSON event per review pushed to Loki
+          # (Grafana Cloud or self-hosted). The reviewer runs unattended, so without
+          # this its cost, duration, and degraded-rate are only visible by opening
+          # individual run logs. Off unless loki-url is set — no URL, no network call.
+          # URL and user are repo VARIABLES (neither is sensitive, and an unset var
+          # expands to "" — a clean kill switch); only the token is a secret. Scope
+          # that token to logs:write ONLY. Dashboard: examples/grafana-dashboard.json.
+          # loki-url: ${{ vars.LOKI_URL }}
+          # loki-user: ${{ vars.LOKI_USER }}
+          # loki-token: ${{ secrets.LOKI_TOKEN }}

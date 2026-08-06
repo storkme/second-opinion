@@ -42,6 +42,18 @@ jobs:
         with:
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           guidance-file: .github/review-guidance.md
+          # Optional runtime monitoring (v1.7.0). The URL and instance id are repo
+          # VARIABLES, not secrets — neither is sensitive (the instance id is already
+          # committed in the estate's Alloy configs), and a variable that doesn't exist
+          # expands to "", which disables metrics entirely with no network call. That
+          # makes vars.LOKI_URL the kill switch: unset it and this reverts to v1.6.0
+          # behaviour without touching the workflow. Only the token is a secret.
+          # NB the token must NOT be gated behind the URL check — if the URL is set and
+          # the token is missing, the push 401s once per review and fail-softs to a log
+          # line. Noisy, not fatal, but it means "monitoring is on" is a two-part claim.
+          loki-url: ${{ vars.LOKI_URL }}
+          loki-user: ${{ vars.LOKI_USER }}
+          loki-token: ${{ secrets.LOKI_TOKEN }}
           # This repo's own PRs outgrew the 900s default: an agentic pass on a large diff
           # with a reasoning model hits the wall and reds the check as degraded, with no
           # review — reviewer malfunction reported as if it were a verdict. Observed on
