@@ -33,7 +33,7 @@ jobs:
       - uses: storkme/second-opinion@v1
         with:
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
-          model: z-ai/glm-5.2
+          model: deepseek/deepseek-v4-flash-0731
           guidance-file: .github/review-guidance.md   # optional: this repo's checklist
           # Optional spend ceiling. pass-timeout-seconds bounds TIME, not money — a
           # looping agent can burn millions of tokens producing nothing, and a longer

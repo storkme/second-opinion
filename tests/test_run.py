@@ -1731,6 +1731,291 @@ def test_parse_max_tokens_rejects_non_numeric_and_defaults_blank():
         assert "must be an integer" in str(e)
 
 
+def _capture_metrics():
+    """Swap run.metrics.emit_event for a recorder; returns (events, original)."""
+    events = []
+    real = run.metrics.emit_event
+    run.metrics.emit_event = lambda ev, labels, fields: events.append((ev, labels, fields))
+    return events, real
+
+
+def test_review_pr_emits_one_posted_metrics_event_with_the_run_numbers():
+    real = (run.K, run.run_pass, run.PROVIDER)
+    run.K, run.PROVIDER = 1, "openrouter"
+    real_deps = _stub_review_pr_deps()
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult(
+        "finding", "ok", cost=0.03, tokens=1200)
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        # dry_run=False: the "post" goes through the stubbed _gh, so this drives the
+        # real posted path — the only place the posted event may be emitted.
+        out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert out.posted is True
+        review_events = [e for e in events if e[0] == "review"]
+        assert len(review_events) == 1, events
+        _ev, labels, fields = review_events[0]
+        assert labels == {"repo": run.REPO, "outcome": "posted"}
+        assert fields["pr"] == 9 and fields["sha"] == "cafebabe00"
+        assert fields["pass_statuses"] == "ok" and fields["passes_ok"] == 1
+        assert fields["tokens"] == 1200 and fields["cost_usd"] == 0.03
+        assert "duration_s" in fields and "diff_chars" in fields
+    finally:
+        run.K, run.run_pass, run.PROVIDER = real
+        _restore_review_pr_deps(real_deps)
+        run.metrics.emit_event = real_emit
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_pr_dry_run_emits_no_metrics_events():
+    # A --dry-run is a preview, not a review — it must not pollute the dashboard's
+    # counts or costs.
+    real = (run.K, run.run_pass, run.PROVIDER)
+    run.K, run.PROVIDER = 1, "openrouter"
+    real_deps = _stub_review_pr_deps()
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult("finding", "ok")
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=True)
+        assert events == [], events
+    finally:
+        run.K, run.run_pass, run.PROVIDER = real
+        _restore_review_pr_deps(real_deps)
+        run.metrics.emit_event = real_emit
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_pr_checkout_failure_emits_a_degraded_event():
+    # _stub_review_pr_deps captures the originals FIRST, then the overrides go on top —
+    # swapping _gh/_git directly with no restore is the cross-test pollution the
+    # helper's docstring warns about.
+    real_deps = _stub_review_pr_deps()
+    run._git = lambda args, check=True: FakeProc(returncode=1, stderr="fatal: bad object\n")
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        out = run.review_pr(7, "t", "deadbeef00", "m", "m", dry_run=False)
+        assert out == run.ReviewOutcome(posted=False, degraded=True)
+        assert len(events) == 1, events
+        _ev, labels, fields = events[0]
+        assert labels["outcome"] == "degraded"
+        assert fields["reason"] == "checkout_failed" and fields["pr"] == 7
+    finally:
+        _restore_review_pr_deps(real_deps)
+        run.metrics.emit_event = real_emit
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_pr_all_passes_empty_emits_a_no_output_degraded_event():
+    real = (run.K, run.run_pass, run.PROVIDER)
+    run.K, run.PROVIDER = 1, "openrouter"
+    real_deps = _stub_review_pr_deps()
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult(
+        "", "empty", cost=0.01, tokens=500)
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert out == run.ReviewOutcome(posted=False, degraded=True)
+        assert len(events) == 1, events
+        _ev, labels, fields = events[0]
+        assert labels["outcome"] == "degraded"
+        assert fields["reason"] == "no_output"
+        assert fields["pass_statuses"] == "empty"
+        assert fields["tokens"] == 500 and fields["cost_usd"] == 0.01
+    finally:
+        run.K, run.run_pass, run.PROVIDER = real
+        _restore_review_pr_deps(real_deps)
+        run.metrics.emit_event = real_emit
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_sweep_emits_one_error_review_event_and_one_sweep_event():
+    # The exactly-one-outcome invariant's subtlest path: review_pr raising must land the
+    # PR under outcome="error" (not silence), and the sweep event must report the round
+    # with silent_failure — plus the skip counters that reconcile candidates vs reviewed.
+    import argparse
+    real = (run.review_pr, run.resolve_model, run.write_models_json, run.pr_meta)
+    run.resolve_model = lambda: "m"
+    run.write_models_json = lambda model: None
+    run.pr_meta = lambda n: {"number": n, "headRefOid": "cafebabe00",
+                             "title": "t", "isDraft": False}
+
+    def boom(pr, title, sha, model, merge_model, dry_run):
+        raise RuntimeError("gh exploded mid-review")
+
+    run.review_pr = boom
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        args = argparse.Namespace(pr=5, dry_run=False, force=True)
+        assert run.sweep(args) is True
+        review_events = [e for e in events if e[0] == "review"]
+        sweep_events = [e for e in events if e[0] == "sweep"]
+        assert len(review_events) == 1 and len(sweep_events) == 1, events
+        _ev, labels, fields = review_events[0]
+        assert labels["outcome"] == "error" and fields["pr"] == 5
+        assert "gh exploded" in fields["error"]
+        assert "duration_s" in fields   # every review event carries it, error included
+        _ev, labels, fields = sweep_events[0]
+        assert labels["outcome"] == "silent_failure"
+        assert fields["candidates"] == 1 and fields["reviewed"] == 0
+        assert fields["skipped_already_reviewed"] == 0 and fields["skipped_draft"] == 0
+    finally:
+        run.review_pr, run.resolve_model, run.write_models_json, run.pr_meta = real
+        run.metrics.emit_event = real_emit
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_pr_duration_spans_the_whole_review_not_just_the_last_pass():
+    # Regression for the t0 shadowing both review bots caught on PR #34: the sequential
+    # pass loop reused `t0` as its per-pass timer, so the emitted duration_s measured
+    # from the start of the LAST pass — under-reporting by ~(K-1)/K on the local
+    # provider (K=3 default), the exact panel the metric exists to feed. A fake clock
+    # makes the span assertable: presence-of-key alone let this slip through.
+    real = (run.K, run.run_pass, run.PROVIDER, run.merge_reviews)
+    run.K, run.PROVIDER = 2, "local"     # K>1 + non-openrouter → the sequential branch
+    real_deps = _stub_review_pr_deps()
+    run.merge_reviews = lambda pr, title, passes, merge_model=None, meta=None: "merged"
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult("finding", "ok")
+    real_mono = run.time.monotonic
+    clock = {"t": 0.0}
+
+    def tick():
+        clock["t"] += 1.0
+        return clock["t"]
+
+    run.time.monotonic = tick
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert out.posted is True
+        fields = [e for e in events if e[0] == "review"][0][2]
+        # Review start is the first tick (1.0); each sequential pass ticks twice; the
+        # emit ticks once more (6.0). The full span is 5.0 — a shadowed t0 would
+        # measure from the last pass's start (4.0) and report 2.0.
+        assert fields["duration_s"] >= 4.0, fields["duration_s"]
+    finally:
+        run.K, run.run_pass, run.PROVIDER, run.merge_reviews = real
+        run.time.monotonic = real_mono
+        _restore_review_pr_deps(real_deps)
+        run.metrics.emit_event = real_emit
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_pr_empty_filtered_diff_emits_a_skipped_event():
+    # Every candidate lands under exactly one review outcome. Without this event, a PR
+    # whose whole diff is excluded by globs is counted in the sweep's candidates but
+    # never appears in any review stream — an unexplained gap on the dashboard.
+    real_deps = _stub_review_pr_deps()
+    run._gh = lambda args, timeout_s=60: ""     # diff filters to nothing
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        out = run.review_pr(11, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert out == run.ReviewOutcome(posted=False, degraded=False)
+        assert len(events) == 1, events
+        _ev, labels, fields = events[0]
+        assert labels["outcome"] == "skipped"
+        assert fields["reason"] == "empty_diff" and fields["pr"] == 11
+    finally:
+        _restore_review_pr_deps(real_deps)
+        run.metrics.emit_event = real_emit
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_watch_loop_emits_a_sweep_error_event_when_a_sweep_throws():
+    # A sweep dying BEFORE its end-of-sweep event (open_prs on an API blip, pr_meta,
+    # write_models_json) is swallowed by the watch loop — without an error event here,
+    # the liveness panel shows a gap identical to a dead daemon. "Up but erroring"
+    # must be distinguishable from "gone".
+    class _Stop(Exception):
+        pass
+
+    def boom(args):
+        raise RuntimeError("open_prs exploded")
+
+    def stop_the_loop(_seconds):
+        raise _Stop()
+
+    real = (run.sweep, run.time.sleep, sys.argv)
+    run.sweep = boom
+    run.time.sleep = stop_the_loop
+    events, real_emit = _capture_metrics()
+    sys.argv = ["run.py", "--watch", "--interval", "1"]
+    try:
+        import contextlib
+        import io
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run.main()
+        except _Stop:
+            pass    # one loop iteration is all this test needs
+        sweep_errors = [e for e in events
+                        if e[0] == "sweep" and e[1].get("outcome") == "error"]
+        assert len(sweep_errors) == 1, events
+        assert "open_prs exploded" in sweep_errors[0][2]["error"]
+    finally:
+        run.sweep, run.time.sleep, sys.argv = real
+        run.metrics.emit_event = real_emit
+
+
+def test_loki_token_is_stripped_from_the_pi_subprocess_env():
+    # Same defense-in-depth as GITHUB_TOKEN: only the parent pushes metrics, so the
+    # agent's unsandboxed bash must never see the Loki credential — nor the URL/user:
+    # an unauthenticated self-hosted LOKI_URL would let an injected bash forge events
+    # or pivot to an internal endpoint.
+    real_popen = run.subprocess.Popen
+    os.environ["LOKI_TOKEN"] = "glc_metrics_secret"
+    os.environ["LOKI_URL"] = "http://internal-loki:3100/loki/api/v1/push"
+    os.environ["LOKI_USER"] = "123456"
+    seen = {}
+
+    class CapturePopen:
+        returncode = 0
+
+        def __init__(self, cmd, **kw):
+            seen["env"] = kw.get("env")
+
+        def communicate(self, input=None, timeout=None):
+            return ("finding", "")
+
+        def kill(self):
+            pass
+
+    run.subprocess.Popen = CapturePopen
+    try:
+        res = run.run_pass("/wt", "m", "sys", "usr")
+        assert res.status == "ok"
+        assert "LOKI_TOKEN" not in seen["env"], "Loki token leaked into the pi subprocess"
+        assert "LOKI_URL" not in seen["env"] and "LOKI_USER" not in seen["env"]
+        assert "GITHUB_TOKEN" not in seen["env"]
+    finally:
+        run.subprocess.Popen = real_popen
+        for k in ("LOKI_TOKEN", "LOKI_URL", "LOKI_USER"):
+            os.environ.pop(k, None)
+
+
+def test_loki_token_is_scrubbed_from_persisted_transcripts():
+    # A prompt-injected agent echoing env into a tool result must not leave the metrics
+    # credential in a transcript a consumer uploads as an artifact.
+    os.environ["LOKI_TOKEN"] = "glc_transcript_secret"
+    try:
+        assert "glc_transcript_secret" in run._secret_values()
+        scrubbed = run._redact_text("token is glc_transcript_secret here")
+        assert "glc_transcript_secret" not in scrubbed and "[REDACTED]" in scrubbed
+    finally:
+        os.environ.pop("LOKI_TOKEN", None)
+
+
 # Keep this LAST: it iterates globals() at execution time, so any test defined
 # below it would be silently skipped by the `python -m tests.test_run` runner
 # (found by PR #18's own review bots — the appended tests were being skipped).

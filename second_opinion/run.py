@@ -21,7 +21,8 @@ Env:
   PROVIDER            openrouter (default) | local
   OPENROUTER_API_KEY  required when PROVIDER or MERGE_PROVIDER is openrouter
   LLAMA_SERVER_URL    required when PROVIDER or MERGE_PROVIDER is local; model is auto-discovered
-  MODEL               OpenRouter model id (default z-ai/glm-5.2; ignored for PROVIDER=local)
+  MODEL               OpenRouter model id (default deepseek/deepseek-v4-flash-0731;
+                      ignored for PROVIDER=local)
   OPENROUTER_BASE_URL default https://openrouter.ai/api
   K                   agentic passes to union (default: 1 openrouter / 3 local; K=1 skips the merge)
   MERGE_PROVIDER      union-merge backend: openrouter | local (default = PROVIDER)
@@ -37,6 +38,10 @@ Env:
   PI_REASONING        whether the model is a reasoning model (default true)
   FAIL_ON_DEGRADED    exit 2 when a degraded pass posts no review (default true; set
                       false for the old always-green behavior)
+  LOKI_URL            optional: Loki push endpoint for runtime metrics events (see
+                      metrics.py); unset (default) = no metrics, no network call
+  LOKI_USER           basic-auth user for LOKI_URL (Grafana Cloud: Loki instance id)
+  LOKI_TOKEN          basic-auth password for LOKI_URL (Grafana Cloud: a logs:write token)
   REPO_DIR            repo checkout (default: cwd)
 
 Usage: run.py [--pr N] [--dry-run] [--force] [--watch [--interval S]]
@@ -59,6 +64,7 @@ from typing import NamedTuple
 
 import requests
 
+from . import metrics
 from . import review as rv
 from .providers import DEFAULT_MODEL, pi_provider, write_models_json
 
@@ -424,7 +430,8 @@ _REDACT_RE = re.compile(r"sk-or-v1-[A-Za-z0-9_-]+")
 
 
 def _secret_values() -> list:
-    vals = [os.environ.get(k, "").strip() for k in ("OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN")]
+    vals = [os.environ.get(k, "").strip()
+            for k in ("OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "LOKI_TOKEN")]
     return [v for v in vals if v]
 
 
@@ -657,10 +664,14 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
     # Defense-in-depth: don't hand the agent's shell the GitHub token. pi reaches the
     # provider via the key in models.json; GH_TOKEN/GITHUB_TOKEN are for _gh() only, so
     # drop them here — a bash-tool prompt-injection can't exfiltrate the token that posts
-    # comments / reads the repo. (Not a full sandbox: the OpenRouter key still lives in
+    # comments / reads the repo. The LOKI_* trio likewise: only the parent pushes
+    # metrics, and while only the token is a secret, an UNAUTHENTICATED self-hosted
+    # LOKI_URL in the agent's env would let an injected bash forge events or pivot to
+    # an internal endpoint — the pass needs none of them. (Not a full sandbox: the OpenRouter key still lives in
     # models.json — chmod 600'd by providers.py — and the worktree's git config can hold
     # the checkout token. Trusting PR authors is the real boundary; see README Security.)
-    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GITHUB_TOKEN", "GH_TOKEN", "LOKI_URL", "LOKI_USER", "LOKI_TOKEN")}
     prior_files = _list_session_files(session_dir)
     proc = None
     try:
@@ -1191,12 +1202,20 @@ def _post_failure_notice(pr: int, sha: str, dry_run: bool, checkout: bool = Fals
 
 
 def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_run: bool) -> ReviewOutcome:
+    t0 = time.monotonic()
     diff = _gh(["pr", "diff", str(pr)])
     globs = _exclude_globs()
     fd = rv.filter_diff(diff, globs, MAX_DIFF_CHARS)
     filtered = fd.text
     if not filtered.strip():
         log(f"#{pr}: empty filtered diff — skipping")
+        # Still an event: sweep counts this PR as a candidate, and a candidate that
+        # produces no review event at all reads as an unexplained dashboard gap.
+        if not dry_run:
+            metrics.emit_event("review", {"repo": REPO, "outcome": "skipped"}, {
+                "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
+                "reason": "empty_diff",
+                "duration_s": round(time.monotonic() - t0, 1)})
         return ReviewOutcome(False, False)
 
     system = rv.system_prompt(PROJECT, _guidance())
@@ -1222,6 +1241,11 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         log(f"#{pr}: worktree add failed @ {sha[:10]}: {detail}")
         _annotate("error", f"#{pr}: worktree add failed @ {sha[:10]} — {detail} — no review produced")
         _post_failure_notice(pr, sha, dry_run, checkout=True)
+        if not dry_run:
+            metrics.emit_event("review", {"repo": REPO, "outcome": "degraded"}, {
+                "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
+                "reason": "checkout_failed",
+                "duration_s": round(time.monotonic() - t0, 1)})
         return ReviewOutcome(False, True)
 
     passes: list[str] = []
@@ -1279,9 +1303,11 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         else:
             ordered = []
             for i, msg in enumerate(msgs):
-                t0 = time.monotonic()
+                # pass_t0, not t0 — reusing t0 here would shadow the review-start timer
+                # and make the emitted duration_s measure only the LAST pass (PR #34).
+                pass_t0 = time.monotonic()
                 ordered.append(run_pass(wt, model, system, msg))
-                elapsed[i] = time.monotonic() - t0
+                elapsed[i] = time.monotonic() - pass_t0
         for i, result in enumerate(ordered):
             total_cost += result.cost
             total_tokens += result.tokens
@@ -1300,6 +1326,13 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         # all. The notice is NOT a review, so the configurable degraded tripwire still applies.
         log(f"#{pr}: all passes empty — posting failure notice")
         _post_failure_notice(pr, sha, dry_run)
+        if not dry_run:
+            metrics.emit_event("review", {"repo": REPO, "outcome": "degraded"}, {
+                "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
+                "reason": "no_output", "k": K,
+                "pass_statuses": ",".join(r.status for r in ordered),
+                "tokens": total_tokens, "cost_usd": round(total_cost, 6),
+                "duration_s": round(time.monotonic() - t0, 1)})
         return ReviewOutcome(False, True)
 
     k = len(passes)
@@ -1354,6 +1387,22 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         except OSError:
             pass  # cleanup only — must not escape and turn a posted review into exit 2
     log(f"#{pr}: posted {pass_label} review ({model})")
+    # After the post succeeded, never before — a failed post escapes to sweep(), which
+    # emits the outcome="error" event, so every review lands under exactly one outcome.
+    # The dry_run guard is belt-and-braces (dry-run returned above): every emit site
+    # guards explicitly, so a refactor of the early return can't break "dry-run emits
+    # nothing" silently.
+    if not dry_run:
+        metrics.emit_event("review", {"repo": REPO, "outcome": "posted"}, {
+            "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
+            # k = CONFIGURED passes (the header's "×k" is effective non-empty passes;
+            # passes_ok/passes_degraded carry that breakdown).
+            "k": K, "pass_statuses": ",".join(r.status for r in ordered),
+            "passes_ok": sum(r.status == "ok" for r in ordered),
+            "passes_degraded": sum(r.status in DEGRADED for r in ordered),
+            "merged": merged, "tokens": total_tokens, "cost_usd": round(total_cost, 6),
+            "diff_chars": len(filtered), "diff_truncated": fd.truncated,
+            "duration_s": round(time.monotonic() - t0, 1)})
     return ReviewOutcome(True, degraded)
 
 
@@ -1362,8 +1411,14 @@ def sweep(args: argparse.Namespace) -> bool:
     Returns True if any PR ended in a silent failure (a degraded pass — or an unhandled
     review error — that posted no review); the single-shot caller turns that into a
     non-zero exit. Never aborts the sweep early: every candidate PR is still processed."""
+    t0 = time.monotonic()
     model = resolve_model()
     if model is None:
+        # Still an event: for the daemon this is the "llama-server is down" liveness
+        # signal, invisible in every other stream.
+        if not args.dry_run:
+            metrics.emit_event("sweep", {"repo": REPO, "outcome": "skipped"},
+                               {"reason": "provider_unreachable"})
         return False
     write_models_json(model)  # register the provider's model with pi
     merge_model = _merge_model_for(model)
@@ -1380,16 +1435,24 @@ def sweep(args: argparse.Namespace) -> bool:
         log(f"config: {problem}")
         _annotate("error", f"config: {problem}")
     silent_failure = False
+    reviewed = 0
+    skipped_already_reviewed = 0
+    skipped_draft = 0
     for t in targets:
         n, sha, title = t["number"], t["headRefOid"], t["title"]
         if t.get("isDraft") and not args.force:
             log(f"#{n}: draft — skipping (use --force to override)")
+            skipped_draft += 1
             continue
         if not args.force and already_reviewed(n, sha):
             log(f"#{n}: head {sha[:10]} already reviewed — skipping")
+            skipped_already_reviewed += 1
             continue
+        pr_t0 = time.monotonic()
         try:
             outcome = review_pr(n, title, sha, model, merge_model, args.dry_run)
+            if outcome.posted:
+                reviewed += 1
             if _should_fail(outcome.posted, outcome.degraded):
                 silent_failure = True
         except Exception as e:  # noqa: BLE001 — one PR's failure shouldn't sink the rest
@@ -1398,6 +1461,25 @@ def sweep(args: argparse.Namespace) -> bool:
             log(f"#{n}: ERROR {str(e)[:200]} — continuing")
             _annotate("error", f"#{n}: review errored — {' '.join(str(e).split())[:150]}")
             silent_failure = True
+            if not args.dry_run:
+                metrics.emit_event("review", {"repo": REPO, "outcome": "error"}, {
+                    "pr": n, "sha": sha, "model": model, "provider": PROVIDER,
+                    "error": " ".join(str(e).split())[:200],
+                    "duration_s": round(time.monotonic() - pr_t0, 1)})
+    if not args.dry_run:
+        # The skip counts cover the PRs that never reach review_pr (drafts,
+        # already-reviewed heads — no review event; per-PR skip events for them would
+        # re-fire for every open PR on every daemon sweep). The remaining residual
+        # (candidates - reviewed - skipped_*) equals this sweep's NON-POSTED review
+        # events (skipped/degraded/error), which do emit per-PR — the reconciliation
+        # needs both streams, not these counters alone.
+        metrics.emit_event(
+            "sweep",
+            {"repo": REPO, "outcome": "silent_failure" if silent_failure else "ok"},
+            {"candidates": len(targets), "reviewed": reviewed,
+             "skipped_already_reviewed": skipped_already_reviewed,
+             "skipped_draft": skipped_draft,
+             "duration_s": round(time.monotonic() - t0, 1)})
     return silent_failure
 
 
@@ -1416,6 +1498,10 @@ def main() -> None:
     ap.add_argument("--interval", type=int, default=1800,
                     help="seconds between sweeps in --watch mode (default 1800)")
     args = ap.parse_args()
+
+    # GITHUB_ACTIONS is runner-set; a bare CLI run without it is "oneshot" (cron, local).
+    metrics.DELIVERY = ("daemon" if args.watch
+                        else "action" if os.environ.get("GITHUB_ACTIONS") else "oneshot")
 
     if not REPO:
         raise SystemExit("Missing required environment variable: GITHUB_REPO (or GITHUB_REPOSITORY)")
@@ -1442,6 +1528,16 @@ def main() -> None:
             sweep(args)
         except Exception as e:  # noqa: BLE001 — a bad sweep shouldn't kill the daemon
             log(f"sweep ERROR {str(e)[:200]} — retrying next tick")
+            # A sweep that died BEFORE its end-of-sweep event (open_prs, pr_meta,
+            # write_models_json) would otherwise leave a liveness-panel gap
+            # indistinguishable from a dead daemon — "up but erroring" must read
+            # differently from "gone". Fail-soft like every emit, so a metrics
+            # outage can't kill the daemon either. Intentionally count-less: this
+            # handler can't see sweep()'s partial counters, and any per-PR review
+            # events the sweep emitted before dying already carry its story.
+            if not args.dry_run:
+                metrics.emit_event("sweep", {"repo": REPO, "outcome": "error"},
+                                   {"error": " ".join(str(e).split())[:200]})
         log(f"sleeping {args.interval}s")
         time.sleep(args.interval)
 

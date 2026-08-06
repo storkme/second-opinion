@@ -33,6 +33,12 @@ services:
       EXCLUDE_GLOBS: ${EXCLUDE_GLOBS:-}
       TOOLS: ${TOOLS:-read,bash}
       PI_REASONING: ${PI_REASONING:-true}
+      # Optional monitoring: push one JSON event per review/sweep to a Loki endpoint
+      # (Grafana Cloud or self-hosted). Empty = disabled, keeping PROVIDER=local
+      # fully offline. See README "Monitoring".
+      LOKI_URL: ${LOKI_URL:-}
+      LOKI_USER: ${LOKI_USER:-}
+      LOKI_TOKEN: ${LOKI_TOKEN:-}
       INTERVAL: ${INTERVAL:-1800}
       REPO_DIR: /repo
     volumes:
