@@ -251,14 +251,14 @@
       "id": 9,
       "type": "table",
       "title": "Review rounds per PR",
-      "description": "How many second-opinion reviews each PR has accumulated in the selected range (a force-push mints a new head SHA and earns a fresh round).",
+      "description": "How many second-opinion reviews each PR has accumulated in the selected range (a force-push mints a new head SHA and earns a fresh round). Counts posted reviews only — skipped/degraded attempts are not rounds.",
       "datasource": { "type": "loki", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
       "targets": [
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "topk(25, sum by (repo, pr) (count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json [$__range])))"
+          "expr": "topk(25, sum by (repo, pr) (count_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"$repo\"} | json [$__range])))"
         }
       ],
       "transformations": [{ "id": "labelsToFields", "options": {} }],

@@ -663,12 +663,14 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
     # Defense-in-depth: don't hand the agent's shell the GitHub token. pi reaches the
     # provider via the key in models.json; GH_TOKEN/GITHUB_TOKEN are for _gh() only, so
     # drop them here — a bash-tool prompt-injection can't exfiltrate the token that posts
-    # comments / reads the repo. LOKI_TOKEN likewise: only the parent pushes metrics,
-    # the pass never needs it. (Not a full sandbox: the OpenRouter key still lives in
+    # comments / reads the repo. The LOKI_* trio likewise: only the parent pushes
+    # metrics, and while only the token is a secret, an UNAUTHENTICATED self-hosted
+    # LOKI_URL in the agent's env would let an injected bash forge events or pivot to
+    # an internal endpoint — the pass needs none of them. (Not a full sandbox: the OpenRouter key still lives in
     # models.json — chmod 600'd by providers.py — and the worktree's git config can hold
     # the checkout token. Trusting PR authors is the real boundary; see README Security.)
     env = {k: v for k, v in os.environ.items()
-           if k not in ("GITHUB_TOKEN", "GH_TOKEN", "LOKI_TOKEN")}
+           if k not in ("GITHUB_TOKEN", "GH_TOKEN", "LOKI_URL", "LOKI_USER", "LOKI_TOKEN")}
     prior_files = _list_session_files(session_dir)
     proc = None
     try:
@@ -1386,14 +1388,18 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     log(f"#{pr}: posted {pass_label} review ({model})")
     # After the post succeeded, never before — a failed post escapes to sweep(), which
     # emits the outcome="error" event, so every review lands under exactly one outcome.
-    metrics.emit_event("review", {"repo": REPO, "outcome": "posted"}, {
-        "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
-        "k": K, "pass_statuses": ",".join(r.status for r in ordered),
-        "passes_ok": sum(r.status == "ok" for r in ordered),
-        "passes_degraded": sum(r.status in DEGRADED for r in ordered),
-        "merged": merged, "tokens": total_tokens, "cost_usd": round(total_cost, 6),
-        "diff_chars": len(filtered), "diff_truncated": fd.truncated,
-        "duration_s": round(time.monotonic() - t0, 1)})
+    # The dry_run guard is belt-and-braces (dry-run returned above): every emit site
+    # guards explicitly, so a refactor of the early return can't break "dry-run emits
+    # nothing" silently.
+    if not dry_run:
+        metrics.emit_event("review", {"repo": REPO, "outcome": "posted"}, {
+            "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
+            "k": K, "pass_statuses": ",".join(r.status for r in ordered),
+            "passes_ok": sum(r.status == "ok" for r in ordered),
+            "passes_degraded": sum(r.status in DEGRADED for r in ordered),
+            "merged": merged, "tokens": total_tokens, "cost_usd": round(total_cost, 6),
+            "diff_chars": len(filtered), "diff_truncated": fd.truncated,
+            "duration_s": round(time.monotonic() - t0, 1)})
     return ReviewOutcome(True, degraded)
 
 
@@ -1427,13 +1433,17 @@ def sweep(args: argparse.Namespace) -> bool:
         _annotate("error", f"config: {problem}")
     silent_failure = False
     reviewed = 0
+    skipped_already_reviewed = 0
+    skipped_draft = 0
     for t in targets:
         n, sha, title = t["number"], t["headRefOid"], t["title"]
         if t.get("isDraft") and not args.force:
             log(f"#{n}: draft — skipping (use --force to override)")
+            skipped_draft += 1
             continue
         if not args.force and already_reviewed(n, sha):
             log(f"#{n}: head {sha[:10]} already reviewed — skipping")
+            skipped_already_reviewed += 1
             continue
         try:
             outcome = review_pr(n, title, sha, model, merge_model, args.dry_run)
@@ -1452,10 +1462,16 @@ def sweep(args: argparse.Namespace) -> bool:
                     "pr": n, "sha": sha, "model": model, "provider": PROVIDER,
                     "error": " ".join(str(e).split())[:200]})
     if not args.dry_run:
+        # The skip counts reconcile candidates vs reviewed: drafts and already-reviewed
+        # heads never reach review_pr (no review event), and per-PR skip events here
+        # would re-fire for every open PR on every daemon sweep — counts carry the same
+        # information without flooding the review stream.
         metrics.emit_event(
             "sweep",
             {"repo": REPO, "outcome": "silent_failure" if silent_failure else "ok"},
             {"candidates": len(targets), "reviewed": reviewed,
+             "skipped_already_reviewed": skipped_already_reviewed,
+             "skipped_draft": skipped_draft,
              "duration_s": round(time.monotonic() - t0, 1)})
     return silent_failure
 

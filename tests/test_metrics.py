@@ -35,7 +35,6 @@ def test_disabled_by_default_never_touches_the_network():
     try:
         metrics.emit_event("review", {"repo": "o/r"}, {"pr": 1})
         assert calls == [], "disabled metrics still made a network call"
-        assert metrics.enabled() is False
     finally:
         metrics.LOKI_URL = real
 
@@ -73,7 +72,6 @@ def test_event_payload_keeps_label_discipline_and_auth():
         body = json.loads(line)
         assert body == {"event": "review", "pr": 42, "sha": "cafebabe",
                         "cost_usd": 0.031, "tokens": 1000}
-        assert metrics.enabled() is True
     finally:
         _configured(**saved)
 

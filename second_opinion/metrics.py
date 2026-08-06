@@ -46,10 +46,6 @@ PUSH_TIMEOUT_S = 10
 DELIVERY = "oneshot"
 
 
-def enabled() -> bool:
-    return bool(LOKI_URL)
-
-
 def emit_event(event: str, labels: dict, fields: dict) -> None:
     """Push one event to Loki. Never raises: a failed push is one log line, because a
     reviewer that breaks when its monitoring does has the dependency backwards."""
