@@ -1394,6 +1394,8 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     if not dry_run:
         metrics.emit_event("review", {"repo": REPO, "outcome": "posted"}, {
             "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
+            # k = CONFIGURED passes (the header's "×k" is effective non-empty passes;
+            # passes_ok/passes_degraded carry that breakdown).
             "k": K, "pass_statuses": ",".join(r.status for r in ordered),
             "passes_ok": sum(r.status == "ok" for r in ordered),
             "passes_degraded": sum(r.status in DEGRADED for r in ordered),
@@ -1523,6 +1525,14 @@ def main() -> None:
             sweep(args)
         except Exception as e:  # noqa: BLE001 — a bad sweep shouldn't kill the daemon
             log(f"sweep ERROR {str(e)[:200]} — retrying next tick")
+            # A sweep that died BEFORE its end-of-sweep event (open_prs, pr_meta,
+            # write_models_json) would otherwise leave a liveness-panel gap
+            # indistinguishable from a dead daemon — "up but erroring" must read
+            # differently from "gone". Fail-soft like every emit, so a metrics
+            # outage can't kill the daemon either.
+            if not args.dry_run:
+                metrics.emit_event("sweep", {"repo": REPO, "outcome": "error"},
+                                   {"error": " ".join(str(e).split())[:200]})
         log(f"sleeping {args.interval}s")
         time.sleep(args.interval)
 

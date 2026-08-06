@@ -1932,6 +1932,42 @@ def test_review_pr_empty_filtered_diff_emits_a_skipped_event():
         run._annotate = _REAL_ANNOTATE
 
 
+def test_watch_loop_emits_a_sweep_error_event_when_a_sweep_throws():
+    # A sweep dying BEFORE its end-of-sweep event (open_prs on an API blip, pr_meta,
+    # write_models_json) is swallowed by the watch loop — without an error event here,
+    # the liveness panel shows a gap identical to a dead daemon. "Up but erroring"
+    # must be distinguishable from "gone".
+    class _Stop(Exception):
+        pass
+
+    def boom(args):
+        raise RuntimeError("open_prs exploded")
+
+    def stop_the_loop(_seconds):
+        raise _Stop()
+
+    real = (run.sweep, run.time.sleep, sys.argv)
+    run.sweep = boom
+    run.time.sleep = stop_the_loop
+    events, real_emit = _capture_metrics()
+    sys.argv = ["run.py", "--watch", "--interval", "1"]
+    try:
+        import contextlib
+        import io
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run.main()
+        except _Stop:
+            pass    # one loop iteration is all this test needs
+        sweep_errors = [e for e in events
+                        if e[0] == "sweep" and e[1].get("outcome") == "error"]
+        assert len(sweep_errors) == 1, events
+        assert "open_prs exploded" in sweep_errors[0][2]["error"]
+    finally:
+        run.sweep, run.time.sleep, sys.argv = real
+        run.metrics.emit_event = real_emit
+
+
 def test_loki_token_is_stripped_from_the_pi_subprocess_env():
     # Same defense-in-depth as GITHUB_TOKEN: only the parent pushes metrics, so the
     # agent's unsandboxed bash must never see the Loki credential — nor the URL/user:
