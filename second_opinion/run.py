@@ -1206,6 +1206,13 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     filtered = fd.text
     if not filtered.strip():
         log(f"#{pr}: empty filtered diff — skipping")
+        # Still an event: sweep counts this PR as a candidate, and a candidate that
+        # produces no review event at all reads as an unexplained dashboard gap.
+        if not dry_run:
+            metrics.emit_event("review", {"repo": REPO, "outcome": "skipped"}, {
+                "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
+                "reason": "empty_diff",
+                "duration_s": round(time.monotonic() - t0, 1)})
         return ReviewOutcome(False, False)
 
     system = rv.system_prompt(PROJECT, _guidance())
@@ -1293,9 +1300,11 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         else:
             ordered = []
             for i, msg in enumerate(msgs):
-                t0 = time.monotonic()
+                # pass_t0, not t0 — reusing t0 here would shadow the review-start timer
+                # and make the emitted duration_s measure only the LAST pass (PR #34).
+                pass_t0 = time.monotonic()
                 ordered.append(run_pass(wt, model, system, msg))
-                elapsed[i] = time.monotonic() - t0
+                elapsed[i] = time.monotonic() - pass_t0
         for i, result in enumerate(ordered):
             total_cost += result.cost
             total_tokens += result.tokens

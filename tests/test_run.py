@@ -1807,6 +1807,64 @@ def test_review_pr_checkout_failure_emits_a_degraded_event():
         run._annotate = _REAL_ANNOTATE
 
 
+def test_review_pr_duration_spans_the_whole_review_not_just_the_last_pass():
+    # Regression for the t0 shadowing both review bots caught on PR #34: the sequential
+    # pass loop reused `t0` as its per-pass timer, so the emitted duration_s measured
+    # from the start of the LAST pass — under-reporting by ~(K-1)/K on the local
+    # provider (K=3 default), the exact panel the metric exists to feed. A fake clock
+    # makes the span assertable: presence-of-key alone let this slip through.
+    real = (run.K, run.run_pass, run.PROVIDER, run.merge_reviews)
+    run.K, run.PROVIDER = 2, "local"     # K>1 + non-openrouter → the sequential branch
+    real_deps = _stub_review_pr_deps()
+    run.merge_reviews = lambda pr, title, passes, merge_model=None, meta=None: "merged"
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult("finding", "ok")
+    real_mono = run.time.monotonic
+    clock = {"t": 0.0}
+
+    def tick():
+        clock["t"] += 1.0
+        return clock["t"]
+
+    run.time.monotonic = tick
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert out.posted is True
+        fields = [e for e in events if e[0] == "review"][0][2]
+        # Review start is the first tick (1.0); each sequential pass ticks twice; the
+        # emit ticks once more (6.0). The full span is 5.0 — a shadowed t0 would
+        # measure from the last pass's start (4.0) and report 2.0.
+        assert fields["duration_s"] >= 4.0, fields["duration_s"]
+    finally:
+        run.K, run.run_pass, run.PROVIDER, run.merge_reviews = real
+        run.time.monotonic = real_mono
+        _restore_review_pr_deps(real_deps)
+        run.metrics.emit_event = real_emit
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_pr_empty_filtered_diff_emits_a_skipped_event():
+    # Every candidate lands under exactly one review outcome. Without this event, a PR
+    # whose whole diff is excluded by globs is counted in the sweep's candidates but
+    # never appears in any review stream — an unexplained gap on the dashboard.
+    real_deps = _stub_review_pr_deps()
+    run._gh = lambda args, timeout_s=60: ""     # diff filters to nothing
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        out = run.review_pr(11, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert out == run.ReviewOutcome(posted=False, degraded=False)
+        assert len(events) == 1, events
+        _ev, labels, fields = events[0]
+        assert labels["outcome"] == "skipped"
+        assert fields["reason"] == "empty_diff" and fields["pr"] == 11
+    finally:
+        _restore_review_pr_deps(real_deps)
+        run.metrics.emit_event = real_emit
+        run._annotate = _REAL_ANNOTATE
+
+
 def test_loki_token_is_stripped_from_the_pi_subprocess_env():
     # Same defense-in-depth as GITHUB_TOKEN: only the parent pushes metrics, so the
     # agent's unsandboxed bash must never see the Loki credential.
