@@ -200,8 +200,9 @@ runtime, cost, how often it degrades, how many review rounds a PR accumulates. W
 API is identical, so moving off the cloud later is a URL + credential swap.
 
 ```jsonc
-// event="review", labels: service/delivery/repo/event/outcome
-{"event": "review", "pr": 574, "sha": "…", "outcome": "posted", "model": "z-ai/glm-5.2",
+// Stream labels (indexed, low-cardinality): service/delivery/repo/event/outcome —
+// e.g. outcome="posted". Everything else rides in the JSON line, parsed by `| json`:
+{"event": "review", "pr": 574, "sha": "…", "model": "z-ai/glm-5.2",
  "provider": "openrouter", "k": 1, "pass_statuses": "ok", "passes_ok": 1,
  "passes_degraded": 0, "merged": true, "tokens": 184000, "cost_usd": 0.031,
  "diff_chars": 41200, "diff_truncated": false, "duration_s": 412.3}
