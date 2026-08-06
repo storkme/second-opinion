@@ -98,6 +98,13 @@ PASS_TIMEOUT_S = int(_pt) if _pt else 1800
 # silently disable a cost-only ceiling.
 # Deferred because _annotate is defined below; main() emits these at startup.
 _CONFIG_ERRORS: list[str] = []
+# The same problems, kept for the life of the process after _CONFIG_ERRORS is drained.
+# Draining is right for ANNOTATIONS — a daemon must not red every tick over one typo —
+# but wrong for monitoring: the ceiling stays inactive for the daemon's entire life, so
+# every sweep event should keep saying so. Annotate once, report always. Without this a
+# --watch daemon runs for weeks believing it has a spend ceiling it does not have, and
+# the only evidence is one line in a log nobody is reading.
+_CONFIG_DEGRADED: list[str] = []
 
 
 def _num_env(name: str, cast, default):
@@ -925,6 +932,13 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
             for field, value in attempt_meta.items():
                 meta[field] = meta.get(field, 0) + value
         if out:
+            # Record the attempt count and any FIRST-attempt failure even on success.
+            # A merge that failed once and recovered is invisible today — the annotation
+            # only fires when both attempts fail — but it is the leading indicator of the
+            # provider degrading, and the run it precedes is the one that falls back.
+            if meta is not None:
+                meta["attempts"] = attempt
+                meta["failures"] = list(failures)
             return out
         reason = (f"raised {type(err).__name__}: {str(err)[:120]}" if err is not None
                   else "returned no usable content")
@@ -941,6 +955,8 @@ def merge_reviews(pr: int, title: str, passes: list[str], merge_model: str | Non
     # than claiming a "union ×K" that did not happen.
     if meta is not None:
         meta["merged"] = False
+        meta["attempts"] = len(failures)
+        meta["failures"] = list(failures)
     parts = [f"*(union merge unavailable — the {len(passes)} independent passes follow "
              "unmerged; findings may repeat or disagree between passes)*"]
     parts += [f"### Pass {i+1} of {len(passes)}\n\n{p}" for i, p in enumerate(passes)]
@@ -1233,6 +1249,39 @@ def _pass_events(pr: int, sha: str, model: str, ordered: list, elapsed: dict) ->
             for i, r in enumerate(ordered)]
 
 
+def _merge_event(pr: int, sha: str, merge_model: str, mm: dict) -> tuple:
+    """The K>1 union merge, as one (event, labels, fields) triple.
+
+    The merge is the one model call with no event of its own. The review event carries
+    `merged: true|false`, which says a fallback happened but never why, and pools the
+    merge's spend into the review totals — including the spend of FAILED attempts, which
+    are accumulated deliberately because an empty-content 200 from a reasoning model is
+    the expensive failure, not the cheap one.
+
+    `outcome` distinguishes three states the boolean cannot:
+      merged           — first attempt worked.
+      merged_on_retry  — attempt 1 failed, attempt 2 recovered. Invisible today: the
+                         annotation only fires when BOTH fail, so this leading indicator
+                         of a degrading provider exists solely as a stdout line.
+      fallback         — both failed; the raw passes were posted unmerged.
+
+    `failures` keeps BOTH reasons rather than the last, for the reason merge_reviews
+    already documents: a 402 then an empty 200 is credits exhaustion — persistent, and it
+    will recur every sweep — whereas the last reason alone files it as "the model flaked".
+    That is the alertable case, and an annotation on one CI run is the wrong place for it.
+    """
+    failures = mm.get("failures") or []
+    merged = mm.get("merged", True)
+    outcome = "merged" if merged and not failures else "merged_on_retry" if merged else "fallback"
+    return ("merge", {"repo": REPO, "outcome": outcome},
+            {"pr": pr, "sha": sha, "model": merge_model, "provider": MERGE_PROVIDER,
+             "merged": merged, "attempts": mm.get("attempts", 0),
+             # Joined, not a list: keeps the line flat for `| json`, which does not
+             # promote array elements into queryable fields.
+             "failures": "; ".join(failures)[:300],
+             "tokens": mm.get("tokens", 0), "cost_usd": round(mm.get("cost", 0.0), 6)})
+
+
 def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_run: bool) -> ReviewOutcome:
     t0 = time.monotonic()
     diff = _gh(["pr", "diff", str(pr)])
@@ -1375,10 +1424,11 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
 
     k = len(passes)
     merged = True
+    mm: dict | None = None
     if k == 1:
         review_body = passes[0]
     else:
-        mm: dict = {}
+        mm = {}
         review_body = merge_reviews(pr, title, passes, merge_model, meta=mm)
         total_cost += mm.get("cost", 0.0)
         total_tokens += mm.get("tokens", 0)
@@ -1449,7 +1499,11 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
                 "cost_usd": round(total_cost, 6),
                 "diff_chars": len(filtered), "diff_truncated": fd.truncated,
                 "duration_s": round(time.monotonic() - t0, 1)}),
-            *_pass_events(pr, sha, model, ordered, elapsed)])
+            *_pass_events(pr, sha, model, ordered, elapsed),
+            # Only when a merge actually ran (K>1). At K=1 there is no merge to describe,
+            # and emitting a zeroed one would put "0 attempts, $0" rows into the merge
+            # panels for every single-pass repo.
+            *([_merge_event(pr, sha, merge_model, mm)] if mm is not None else [])])
     return ReviewOutcome(True, degraded)
 
 
@@ -1479,6 +1533,7 @@ def sweep(args: argparse.Namespace) -> bool:
         # ceiling should not annotate red on every tick for the daemon's lifetime.
         # Surfaced here rather than at import because _annotate is defined below.
         problem = _CONFIG_ERRORS.pop(0)
+        _CONFIG_DEGRADED.append(problem)   # survives the drain; see its definition
         log(f"config: {problem}")
         _annotate("error", f"config: {problem}")
     silent_failure = False
@@ -1526,7 +1581,15 @@ def sweep(args: argparse.Namespace) -> bool:
             {"candidates": len(targets), "reviewed": reviewed,
              "skipped_already_reviewed": skipped_already_reviewed,
              "skipped_draft": skipped_draft,
-             "duration_s": round(time.monotonic() - t0, 1)})
+             "duration_s": round(time.monotonic() - t0, 1),
+             # Always present, even at 0: an alert on config_degraded > 0 should not have
+             # to distinguish "no problems" from "field absent", and Loki's `| json`
+             # gives no value at all for a missing field rather than a zero.
+             "config_degraded": len(_CONFIG_DEGRADED),
+             # The text only when there IS one — it is the expensive part of the line,
+             # and every sweep for the process's whole life would carry it otherwise.
+             **({"config_problems": "; ".join(_CONFIG_DEGRADED)[:300]}
+                if _CONFIG_DEGRADED else {})})
     return silent_failure
 
 
