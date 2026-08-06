@@ -14,6 +14,31 @@ All notable changes to this project are documented here. The format follows
   with nothing to copy. The pattern documented: URL and instance id are repo **variables**
   (neither is sensitive, and an unset variable expands to `""` — so `vars.LOKI_URL` doubles
   as the kill switch), only the token is a secret.
+### Added
+- **A monitoring event per agentic pass**, alongside the existing per-review event. The
+  review event names *which* pass degraded (`pass_statuses`, `passes_ok`,
+  `passes_degraded`) but pools tokens/cost/seconds across all `K`, so it cannot say what a
+  failure **cost**: at `K>1` a pass that died instantly and one that burned 12.6M tokens
+  first — the #29 runaway signature, and the reason `max-pass-tokens` exists — look
+  identical. Each `pass` event carries its own `status`, `tokens`, `cost_usd`, `chars` and
+  `elapsed_s`, labelled `outcome=<status>` so one selector finds every timeout across every
+  repo. Emitted at `K=1` too: `elapsed_s` is model time alone, while the review's
+  `duration_s` also covers diff fetch, worktree setup and posting, so the pair separates
+  model time from harness overhead — and a uniform schema keeps "pass duration p95" from
+  silently excluding every `K=1` repo. Note `sum(pass.tokens) ≤ review.tokens`; the
+  difference is the `K>1` merge call, which is not a pass.
+- **`metrics.emit_events()`** — batches a review and its `K` pass events into a **single**
+  push, grouping entries by label set with timestamps ascending per stream. This is what
+  makes the above free: looping the existing single-event emitter would have turned one
+  HTTP round trip into `K+1`, each with its own 3s read timeout, on a path whose entire
+  contract is "never delay the review". `emit_event()` is now a thin wrapper over it and is
+  unchanged for callers; the never-raise and disabled-means-no-network contracts hold for
+  both.
+- **Two dashboard panels** in `examples/grafana-dashboard.json`: *Degraded passes — what
+  they burned* (every non-`ok` pass ranked by tokens spent before it stopped, which
+  distinguishes "the ceiling would have helped" from "it failed early anyway") and *Pass
+  duration* p50/p95. Both queries were validated against a live Loki rather than written
+  from the docs.
 
 ## [1.7.0] - 2026-08-06
 

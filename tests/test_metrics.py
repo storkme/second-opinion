@@ -135,3 +135,70 @@ def test_unjsonable_field_values_do_not_kill_the_event():
         assert "weird" in line
     finally:
         _configured(**saved)
+
+
+def test_batch_rides_a_single_request_and_groups_by_label_set():
+    # emit_events exists so that instrumenting K passes costs ONE round trip, not K+1.
+    # Two of these three events share a label set (same repo, both "ok"), so they must
+    # merge into one stream rather than repeating the stream object.
+    posts = []
+    metrics.requests.post = lambda url, **kw: (posts.append(kw), _Resp())[1]
+    saved = _configured(LOKI_URL="http://loki/push", DELIVERY="action")
+    try:
+        metrics.emit_events([
+            ("review", {"repo": "o/r", "outcome": "posted"}, {"pr": 7}),
+            ("pass", {"repo": "o/r", "outcome": "ok"}, {"pr": 7, "pass": 1}),
+            ("pass", {"repo": "o/r", "outcome": "ok"}, {"pr": 7, "pass": 2}),
+        ])
+        assert len(posts) == 1, f"batch made {len(posts)} requests"
+        streams = posts[0]["json"]["streams"]
+        assert len(streams) == 2, streams
+        by_event = {s["stream"]["event"]: s for s in streams}
+        assert set(by_event) == {"review", "pass"}
+        # Both ok-passes land in the shared stream, and their timestamps ascend —
+        # per-stream ordering is Loki's rule, not something to leave to its
+        # out-of-order window (a configurable, not a promise).
+        values = by_event["pass"]["values"]
+        assert len(values) == 2, values
+        assert [int(v[0]) for v in values] == sorted(int(v[0]) for v in values)
+        assert {json.loads(v[1])["pass"] for v in values} == {1, 2}
+    finally:
+        _configured(**saved)
+
+
+def test_empty_batch_makes_no_request():
+    # A K=0 / no-passes batch must be a no-op, not an empty push for Loki to reject.
+    posts = []
+    metrics.requests.post = lambda url, **kw: (posts.append(kw), _Resp())[1]
+    saved = _configured(LOKI_URL="http://loki/push")
+    try:
+        metrics.emit_events([])
+        assert posts == []
+    finally:
+        _configured(**saved)
+
+
+def test_emit_events_never_raises_and_stays_off_when_disabled():
+    # Same two contracts as emit_event: monitoring must never break a review, and
+    # disabled must mean no network call at all (the PROVIDER=local offline invariant).
+    calls = []
+    metrics.requests.post = lambda *a, **k: calls.append(1)
+    saved = _configured(LOKI_URL="")
+    try:
+        metrics.emit_events([("pass", {"repo": "o/r"}, {"pr": 1})])
+        assert calls == []
+    finally:
+        _configured(**saved)
+
+    saved = _configured(LOKI_URL="http://loki/push")
+    try:
+        def boom(*a, **k):
+            raise OSError("connection refused")
+        metrics.requests.post = boom
+        metrics.emit_events([("pass", {"repo": "o/r"}, {"pr": 1})])   # must not raise
+        metrics.requests.post = lambda url, **kw: _Resp(fail=True)
+        metrics.emit_events([("pass", {"repo": "o/r"}, {"pr": 1})])   # must not raise
+        # A malformed triple is a caller bug, but it still must not escape the emitter.
+        metrics.emit_events([("pass", {"repo": "o/r"})])              # must not raise
+    finally:
+        _configured(**saved)

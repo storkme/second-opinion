@@ -73,9 +73,11 @@ second_opinion/
                    # discovered from LLAMA_SERVER_URL/v1/models. (was pi_models.py)
   run.py           # orchestration + CLI: review one PR / sweep all / --watch daemon loop.
                    # merge_reviews() dispatches openrouter|local. Entry point: main().
-  metrics.py       # OPTIONAL monitoring: one JSON event per review/sweep pushed to a Loki
+  metrics.py       # OPTIONAL monitoring: JSON events per review/pass/sweep pushed to a Loki
                    # endpoint (Grafana Cloud or self-hosted). No-op unless LOKI_URL is set;
-                   # strictly fail-soft (emit_event never raises); emitted AFTER the post.
+                   # strictly fail-soft (emit_event/emit_events never raise); emitted AFTER
+                   # the post. emit_events batches a review + its K pass events into ONE
+                   # request, so per-pass detail costs no extra round trip or timeout.
   bootstrap.py     # OFFLINE tool: mine a repo's PR-review history → draft a review-guidance.md
                    # (one strong-model synthesis call; reuses run._chat + DEFAULT_MODEL). Mines
                    # the pulls API (reviewer findings), not the issues stream it posts to —
@@ -134,7 +136,7 @@ agentic path never used.
 | `PI_REASONING` | `true` | honored for **both** providers; set `false` for a non-reasoning model |
 | `PI_MAX_TOKENS` | `65536` openrouter / `32768` local | max completion tokens for a review pass (blank/empty → provider-aware default). OpenRouter defaults to the model cap — deepseek-v4-flash-0731 caps at 65536; the old 32768 could burn a reasoning model's whole budget in the reasoning channel and return an empty 200 (spaghettio #574, #565/#566). Local llama keeps 32768. Override via `max-tokens` action input / env. |
 | `FAIL_ON_DEGRADED` | `true` | exit `2` when a degraded pass (timeout / non-zero pi exit / empty output / failed head-checkout) posts no review; `false` restores always-green |
-| `LOKI_URL` | — (off) | optional monitoring: Loki push endpoint receiving one JSON event per review/sweep (`metrics.py`). Unset = no metrics, no network call — `PROVIDER=local` stays fully offline. Fail-soft: a failed push never degrades a review. |
+| `LOKI_URL` | — (off) | optional monitoring: Loki push endpoint receiving JSON events per review / per pass / per sweep (`metrics.py`). Unset = no metrics, no network call — `PROVIDER=local` stays fully offline. Fail-soft: a failed push never degrades a review. |
 | `LOKI_USER` / `LOKI_TOKEN` | — | basic auth for `LOKI_URL` (Grafana Cloud: instance id / a `logs:write`-scoped token). The token is stripped from the pi subprocess env and scrubbed from persisted transcripts, like the other secrets. |
 | `REPO_DIR` | cwd | the target repo checkout |
 
