@@ -1201,6 +1201,38 @@ def _post_failure_notice(pr: int, sha: str, dry_run: bool, checkout: bool = Fals
             pass
 
 
+def _pass_events(pr: int, sha: str, model: str, ordered: list, elapsed: dict) -> list:
+    """One monitoring event per agentic pass, as (event, labels, fields) triples for
+    metrics.emit_events.
+
+    The review event carries `pass_statuses` ("ok,timeout,ok") and the ok/degraded
+    counts, which says WHICH pass died but not what it cost to die: its tokens, USD and
+    seconds are pooled into the review totals. At K=1 that pooling is lossless. At K>1 it
+    hides the question actually worth asking after a degraded run — did this pass burn 50
+    tokens or 2M before it stopped? — which is the #29 runaway signature (12.6M tokens,
+    $1.96, zero output), and the reason MAX_PASS_TOKENS exists.
+
+    Emitted at K=1 too, deliberately. The pass event is not redundant there: `elapsed_s`
+    is pass time alone, while the review's `duration_s` also covers diff fetch, worktree
+    setup, merge and post — so the pair separates model time from harness overhead. A
+    uniform schema also means a "pass duration p95" panel does not silently exclude every
+    K=1 repo.
+
+    `chars` is the raw pass output length, which is how an "empty" status is told apart
+    from a short-but-real review without opening the transcript.
+    """
+    return [("pass",
+             # outcome = the pass's own status, so a single stream selector finds every
+             # timeout across every repo. Bounded set (ok/timeout/error/empty/runaway),
+             # so it stays a legal label — pr/sha remain fields, never labels.
+             {"repo": REPO, "outcome": r.status},
+             {"pr": pr, "sha": sha, "model": model, "provider": PROVIDER, "k": K,
+              "pass": i + 1, "status": r.status, "tokens": r.tokens,
+              "cost_usd": round(r.cost, 6), "chars": len(r.text),
+              "elapsed_s": round(elapsed.get(i, 0.0), 1)})
+            for i, r in enumerate(ordered)]
+
+
 def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_run: bool) -> ReviewOutcome:
     t0 = time.monotonic()
     diff = _gh(["pr", "diff", str(pr)])
@@ -1327,12 +1359,18 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         log(f"#{pr}: all passes empty — posting failure notice")
         _post_failure_notice(pr, sha, dry_run)
         if not dry_run:
-            metrics.emit_event("review", {"repo": REPO, "outcome": "degraded"}, {
-                "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
-                "reason": "no_output", "k": K,
-                "pass_statuses": ",".join(r.status for r in ordered),
-                "tokens": total_tokens, "cost_usd": round(total_cost, 6),
-                "duration_s": round(time.monotonic() - t0, 1)})
+            # Review + per-pass events in ONE push. This is the path where the per-pass
+            # spend matters most: every pass failed, so the review totals are the only
+            # record of what the failure cost, and pooled they cannot distinguish three
+            # passes that died instantly from three that each burned millions.
+            metrics.emit_events([
+                ("review", {"repo": REPO, "outcome": "degraded"}, {
+                    "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
+                    "reason": "no_output", "k": K,
+                    "pass_statuses": ",".join(r.status for r in ordered),
+                    "tokens": total_tokens, "cost_usd": round(total_cost, 6),
+                    "duration_s": round(time.monotonic() - t0, 1)}),
+                *_pass_events(pr, sha, model, ordered, elapsed)])
         return ReviewOutcome(False, True)
 
     k = len(passes)
@@ -1393,16 +1431,25 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     # guards explicitly, so a refactor of the early return can't break "dry-run emits
     # nothing" silently.
     if not dry_run:
-        metrics.emit_event("review", {"repo": REPO, "outcome": "posted"}, {
-            "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
-            # k = CONFIGURED passes (the header's "×k" is effective non-empty passes;
-            # passes_ok/passes_degraded carry that breakdown).
-            "k": K, "pass_statuses": ",".join(r.status for r in ordered),
-            "passes_ok": sum(r.status == "ok" for r in ordered),
-            "passes_degraded": sum(r.status in DEGRADED for r in ordered),
-            "merged": merged, "tokens": total_tokens, "cost_usd": round(total_cost, 6),
-            "diff_chars": len(filtered), "diff_truncated": fd.truncated,
-            "duration_s": round(time.monotonic() - t0, 1)})
+        # Review + per-pass events in ONE push, so instrumenting K passes costs the same
+        # single round trip (and single timeout budget) the review event already cost.
+        # NOTE the review's `tokens`/`cost_usd` include the K>1 merge call, which is not
+        # a pass and so has no pass event: sum(pass.tokens) <= review.tokens by design,
+        # and the difference is the merge. Don't build a dashboard that treats a mismatch
+        # as dropped data.
+        metrics.emit_events([
+            ("review", {"repo": REPO, "outcome": "posted"}, {
+                "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
+                # k = CONFIGURED passes (the header's "×k" is effective non-empty passes;
+                # passes_ok/passes_degraded carry that breakdown).
+                "k": K, "pass_statuses": ",".join(r.status for r in ordered),
+                "passes_ok": sum(r.status == "ok" for r in ordered),
+                "passes_degraded": sum(r.status in DEGRADED for r in ordered),
+                "merged": merged, "tokens": total_tokens,
+                "cost_usd": round(total_cost, 6),
+                "diff_chars": len(filtered), "diff_truncated": fd.truncated,
+                "duration_s": round(time.monotonic() - t0, 1)}),
+            *_pass_events(pr, sha, model, ordered, elapsed)])
     return ReviewOutcome(True, degraded)
 
 

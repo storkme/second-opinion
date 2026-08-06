@@ -1732,11 +1732,28 @@ def test_parse_max_tokens_rejects_non_numeric_and_defaults_blank():
 
 
 def _capture_metrics():
-    """Swap run.metrics.emit_event for a recorder; returns (events, original)."""
+    """Swap BOTH emitter entry points for recorders; returns (events, restore).
+
+    Both, because review_pr batches its review + per-pass events through emit_events
+    while the skip/error/sweep paths still emit singly — stubbing only one would let the
+    other reach the real emitter. That is not a network risk (LOKI_URL is empty in
+    tests, so it returns before touching requests) but it would silently drop events the
+    assertions are looking for. Recording into one flat list keeps every existing
+    assertion written against (event, labels, fields) triples working unchanged.
+
+    restore() is a callable rather than a returned original because there are now two
+    attributes to put back, and a test that restored only one would leak a stub into
+    every test that ran after it.
+    """
     events = []
-    real = run.metrics.emit_event
+    real_one, real_many = run.metrics.emit_event, run.metrics.emit_events
     run.metrics.emit_event = lambda ev, labels, fields: events.append((ev, labels, fields))
-    return events, real
+    run.metrics.emit_events = lambda batch: events.extend(batch)
+
+    def restore():
+        run.metrics.emit_event, run.metrics.emit_events = real_one, real_many
+
+    return events, restore
 
 
 def test_review_pr_emits_one_posted_metrics_event_with_the_run_numbers():
@@ -1763,7 +1780,82 @@ def test_review_pr_emits_one_posted_metrics_event_with_the_run_numbers():
     finally:
         run.K, run.run_pass, run.PROVIDER = real
         _restore_review_pr_deps(real_deps)
-        run.metrics.emit_event = real_emit
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_pr_emits_one_pass_event_per_pass_with_its_own_spend():
+    # The point of per-pass events: with K>1 the review event pools tokens/cost/seconds,
+    # so "which pass timed out, and what did it burn before it did" is unanswerable from
+    # the aggregate. Passes here differ in every number so pooling would be detectable.
+    real = (run.K, run.run_pass, run.PROVIDER)
+    run.K, run.PROVIDER = 3, "local"  # local => sequential, so pass order is deterministic
+    real_deps = _stub_review_pr_deps()
+    results = iter([run.PassResult("finding one", "ok", cost=0.01, tokens=100),
+                    run.PassResult("", "timeout", cost=0.50, tokens=900_000),
+                    run.PassResult("finding three", "ok", cost=0.02, tokens=300)])
+    run.run_pass = lambda wt, m, s, u, session_dir=None: next(results)
+    real_merge = run.merge_reviews
+    run.merge_reviews = lambda pr, title, passes, model, meta=None: "merged body"
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert out.posted is True
+        pass_events = [e for e in events if e[0] == "pass"]
+        assert len(pass_events) == 3, events
+        by_index = {f["pass"]: (labels, f) for _e, labels, f in pass_events}
+        assert set(by_index) == {1, 2, 3}, "passes must be identifiable, not anonymous"
+        # The timed-out pass is the one worth finding, and it must carry ITS spend —
+        # 900k tokens — not a third of the review total. This is the #29 signature.
+        labels, timed_out = by_index[2]
+        assert labels["outcome"] == "timeout"
+        assert timed_out["tokens"] == 900_000 and timed_out["cost_usd"] == 0.50
+        assert timed_out["chars"] == 0
+        assert by_index[1][1]["tokens"] == 100 and by_index[3][1]["tokens"] == 300
+        # pr/sha stay FIELDS. As labels they would mint a Loki stream per PR.
+        assert all("pr" not in labels and "sha" not in labels
+                   for labels, _f in by_index.values())
+        assert all(f["k"] == 3 for _l, f in by_index.values())
+    finally:
+        run.K, run.run_pass, run.PROVIDER = real
+        run.merge_reviews = real_merge
+        _restore_review_pr_deps(real_deps)
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_and_pass_events_ride_one_push():
+    # Instrumenting K passes must not turn one HTTP round trip into K+1 — the emitter
+    # runs after the review is posted with a 3s read timeout per call, so a loop would
+    # multiply the worst-case stall by K on a black-holed endpoint.
+    real = (run.K, run.run_pass, run.PROVIDER)
+    run.K, run.PROVIDER = 2, "local"
+    real_deps = _stub_review_pr_deps()
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult(
+        "finding", "ok", cost=0.01, tokens=100)
+    real_merge = run.merge_reviews
+    run.merge_reviews = lambda pr, title, passes, model, meta=None: "merged body"
+    batches = []
+    real_one, real_many = run.metrics.emit_event, run.metrics.emit_events
+    run.metrics.emit_event = lambda ev, labels, fields: batches.append([(ev, labels, fields)])
+    run.metrics.emit_events = lambda batch: batches.append(list(batch))
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert len(batches) == 1, f"expected a single push, got {len(batches)}: {batches}"
+        assert [e[0] for e in batches[0]] == ["review", "pass", "pass"]
+    finally:
+        run.K, run.run_pass, run.PROVIDER = real
+        run.merge_reviews = real_merge
+        _restore_review_pr_deps(real_deps)
+        run.metrics.emit_event, run.metrics.emit_events = real_one, real_many
         run._annotate = _REAL_ANNOTATE
 
 
@@ -1785,7 +1877,7 @@ def test_review_pr_dry_run_emits_no_metrics_events():
     finally:
         run.K, run.run_pass, run.PROVIDER = real
         _restore_review_pr_deps(real_deps)
-        run.metrics.emit_event = real_emit
+        real_emit()
         run._annotate = _REAL_ANNOTATE
 
 
@@ -1806,7 +1898,7 @@ def test_review_pr_checkout_failure_emits_a_degraded_event():
         assert fields["reason"] == "checkout_failed" and fields["pr"] == 7
     finally:
         _restore_review_pr_deps(real_deps)
-        run.metrics.emit_event = real_emit
+        real_emit()
         run._annotate = _REAL_ANNOTATE
 
 
@@ -1824,16 +1916,27 @@ def test_review_pr_all_passes_empty_emits_a_no_output_degraded_event():
         with contextlib.redirect_stdout(io.StringIO()):
             out = run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=False)
         assert out == run.ReviewOutcome(posted=False, degraded=True)
-        assert len(events) == 1, events
-        _ev, labels, fields = events[0]
+        review_events = [e for e in events if e[0] == "review"]
+        assert len(review_events) == 1, events
+        _ev, labels, fields = review_events[0]
         assert labels["outcome"] == "degraded"
         assert fields["reason"] == "no_output"
         assert fields["pass_statuses"] == "empty"
         assert fields["tokens"] == 500 and fields["cost_usd"] == 0.01
+        # The all-passes-failed path is exactly where per-pass spend is the whole
+        # question: pooled into the review totals, three passes that died instantly and
+        # three that each burned millions look identical.
+        pass_events = [e for e in events if e[0] == "pass"]
+        assert len(pass_events) == 1, events
+        _ev, labels, fields = pass_events[0]
+        assert labels["outcome"] == "empty"
+        assert fields["pass"] == 1 and fields["status"] == "empty"
+        assert fields["tokens"] == 500 and fields["cost_usd"] == 0.01
+        assert fields["chars"] == 0, "an empty pass must be visible as zero output"
     finally:
         run.K, run.run_pass, run.PROVIDER = real
         _restore_review_pr_deps(real_deps)
-        run.metrics.emit_event = real_emit
+        real_emit()
         run._annotate = _REAL_ANNOTATE
 
 
@@ -1870,7 +1973,7 @@ def test_sweep_emits_one_error_review_event_and_one_sweep_event():
         assert fields["skipped_already_reviewed"] == 0 and fields["skipped_draft"] == 0
     finally:
         run.review_pr, run.resolve_model, run.write_models_json, run.pr_meta = real
-        run.metrics.emit_event = real_emit
+        real_emit()
         run._annotate = _REAL_ANNOTATE
 
 
@@ -1907,7 +2010,7 @@ def test_review_pr_duration_spans_the_whole_review_not_just_the_last_pass():
         run.K, run.run_pass, run.PROVIDER, run.merge_reviews = real
         run.time.monotonic = real_mono
         _restore_review_pr_deps(real_deps)
-        run.metrics.emit_event = real_emit
+        real_emit()
         run._annotate = _REAL_ANNOTATE
 
 
@@ -1928,7 +2031,7 @@ def test_review_pr_empty_filtered_diff_emits_a_skipped_event():
         assert fields["reason"] == "empty_diff" and fields["pr"] == 11
     finally:
         _restore_review_pr_deps(real_deps)
-        run.metrics.emit_event = real_emit
+        real_emit()
         run._annotate = _REAL_ANNOTATE
 
 
@@ -1965,7 +2068,7 @@ def test_watch_loop_emits_a_sweep_error_event_when_a_sweep_throws():
         assert "open_prs exploded" in sweep_errors[0][2]["error"]
     finally:
         run.sweep, run.time.sleep, sys.argv = real
-        run.metrics.emit_event = real_emit
+        real_emit()
 
 
 def test_loki_token_is_stripped_from_the_pi_subprocess_env():
