@@ -55,7 +55,7 @@ See [`examples/second-opinion.yml`](examples/second-opinion.yml) for the fuller 
 | `openrouter-api-key` | — (required) | OpenRouter key |
 | `github-token` | `${{ github.token }}` | needs `pull-requests: write` |
 | `pr-number` | the triggering PR | which PR to review |
-| `model` | `z-ai/glm-5.2` | OpenRouter model id for the passes |
+| `model` | `deepseek/deepseek-v4-flash-0731` | OpenRouter model id for the passes |
 | `k` | `1` | agentic passes to union; `K=1` skips the merge. For `K>1` on OpenRouter the passes run in parallel (one pi subprocess each); local stays sequential. |
 | `merge-model` | = `model` | model for the `K>1` union merge |
 | `project` | repo name | used in the prompt |
@@ -202,7 +202,7 @@ API is identical, so moving off the cloud later is a URL + credential swap.
 ```jsonc
 // Stream labels (indexed, low-cardinality): service/delivery/repo/event/outcome —
 // e.g. outcome="posted". Everything else rides in the JSON line, parsed by `| json`:
-{"event": "review", "pr": 574, "sha": "…", "model": "z-ai/glm-5.2",
+{"event": "review", "pr": 574, "sha": "…", "model": "deepseek/deepseek-v4-flash-0731",
  "provider": "openrouter", "k": 1, "pass_statuses": "ok", "passes_ok": 1,
  "passes_degraded": 0, "merged": true, "tokens": 184000, "cost_usd": 0.031,
  "diff_chars": 41200, "diff_truncated": false, "duration_s": 412.3}

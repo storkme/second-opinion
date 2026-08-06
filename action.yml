@@ -20,7 +20,7 @@ inputs:
   model:
     description: "OpenRouter model id for the review passes."
     required: false
-    default: "z-ai/glm-5.2"
+    default: "deepseek/deepseek-v4-flash-0731"
   k:
     description: "Agentic passes to union. K=1 (default) skips the merge."
     required: false
@@ -88,7 +88,8 @@ inputs:
     default: "read,bash"
   reasoning:
     description: "Whether the model is a reasoning model. Default true (the default
-      z-ai/glm-5.2 is). Set false for a non-reasoning model so pi omits reasoning params."
+      deepseek-v4-flash-0731 is). Set false for a non-reasoning model so pi omits
+      reasoning params."
     required: false
     default: "true"
   fail-on-degraded:

@@ -7,6 +7,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Default review model is now `deepseek/deepseek-v4-flash-0731`** (was `z-ai/glm-5.2`) —
+  `DEFAULT_MODEL`, the `model` action-input default, and the docs/examples all move
+  together. spaghettio has run this model (pinned) with good results at a much lower
+  per-token rate; consumers that pin `model:` explicitly are unaffected. The
+  `PI_MAX_TOKENS` default (65536) was already sized to this model's completion cap, and
+  it is reasoning-capable, so `reasoning: true` stays the right default. Note the
+  flash-tier pairing spaghettio uses is `k: 3` (union as the recall lever for a weaker
+  model); the action's `k` default remains `1` — set `k: 3` per repo if recall matters
+  more than the extra passes' cost.
+
 ### Added
 - **Optional runtime monitoring via Loki** (`loki-url` / `loki-user` / `loki-token` action
   inputs; env `LOKI_URL` / `LOKI_USER` / `LOKI_TOKEN`). The reviewer runs autonomously, so

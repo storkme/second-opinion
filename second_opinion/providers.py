@@ -20,7 +20,7 @@ from pathlib import Path
 
 # The single source of truth for the OpenRouter default model (carry-forward #5).
 # action.yml mirrors this literal as its input default (YAML can't import it).
-DEFAULT_MODEL = "z-ai/glm-5.2"
+DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 
 
 def pi_provider(provider: str) -> str:

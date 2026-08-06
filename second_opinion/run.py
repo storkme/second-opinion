@@ -21,7 +21,8 @@ Env:
   PROVIDER            openrouter (default) | local
   OPENROUTER_API_KEY  required when PROVIDER or MERGE_PROVIDER is openrouter
   LLAMA_SERVER_URL    required when PROVIDER or MERGE_PROVIDER is local; model is auto-discovered
-  MODEL               OpenRouter model id (default z-ai/glm-5.2; ignored for PROVIDER=local)
+  MODEL               OpenRouter model id (default deepseek/deepseek-v4-flash-0731;
+                      ignored for PROVIDER=local)
   OPENROUTER_BASE_URL default https://openrouter.ai/api
   K                   agentic passes to union (default: 1 openrouter / 3 local; K=1 skips the merge)
   MERGE_PROVIDER      union-merge backend: openrouter | local (default = PROVIDER)

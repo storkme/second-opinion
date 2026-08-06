@@ -117,7 +117,7 @@ agentic path never used.
 | `PROVIDER` | `openrouter` | review provider: `openrouter` \| `local` |
 | `OPENROUTER_API_KEY` | — | required when review or merge provider is `openrouter` |
 | `LLAMA_SERVER_URL` | — | required when review or merge provider is `local` |
-| `MODEL` | `DEFAULT_MODEL` (`z-ai/glm-5.2`) | OpenRouter model id (local: auto-discovered) |
+| `MODEL` | `DEFAULT_MODEL` (`deepseek/deepseek-v4-flash-0731`) | OpenRouter model id (local: auto-discovered) |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api` | |
 | `K` | provider-aware: `1` openrouter, `3` local | agentic passes to union; `K=1` skips the merge. For `K>1` on **openrouter** the passes run **in parallel** (one pi subprocess each) to collapse `K×timeout` wall-clock; **local** stays sequential (a single GPU serves one request at a time). |
 | `MERGE_PROVIDER` | = `PROVIDER` | union-merge backend: `openrouter` \| `local` |
