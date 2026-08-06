@@ -1850,7 +1850,8 @@ def test_review_and_pass_events_ride_one_push():
         with contextlib.redirect_stdout(io.StringIO()):
             run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=False)
         assert len(batches) == 1, f"expected a single push, got {len(batches)}: {batches}"
-        assert [e[0] for e in batches[0]] == ["review", "pass", "pass"]
+        # K=2 so a union merge runs: review + 2 passes + the merge, still one push.
+        assert [e[0] for e in batches[0]] == ["review", "pass", "pass", "merge"]
     finally:
         run.K, run.run_pass, run.PROVIDER = real
         run.merge_reviews = real_merge
@@ -2127,3 +2128,154 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("PASS", name)
+
+
+def test_merge_meta_records_a_recovered_first_attempt():
+    # merged_on_retry is the leading indicator: today a merge that fails once and
+    # recovers annotates nothing (the annotation fires only when BOTH attempts fail), so
+    # the provider degrading is visible solely as a stdout line nobody reads.
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return _Resp({"choices": []})
+        return _Resp({"choices": [{"message": {"content": "merged"}}]})
+
+    run.requests.post = post
+    ann = _capture_annotations()
+    meta: dict = {}
+    try:
+        assert run.merge_reviews(1, "t", ["a", "b"], meta=meta) == "merged"
+        assert meta["attempts"] == 2
+        assert len(meta["failures"]) == 1, meta
+        assert "no usable content" in meta["failures"][0]
+        assert meta.get("merged", True) is True, "it DID merge, on the retry"
+        assert ann == [], "a recovered merge still must not annotate"
+        # The event this feeds must call it out as distinct from a clean first-try merge.
+        _ev, labels, fields = run._merge_event(1, "sha", "m", meta)
+        assert labels["outcome"] == "merged_on_retry"
+        assert fields["attempts"] == 2 and fields["merged"] is True
+    finally:
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_merge_event_keeps_both_failure_reasons_on_fallback():
+    # Credits exhaustion looks like a 402 then an empty 200 — persistent, recurring every
+    # sweep. Keeping only the last reason files it as "the model flaked", which is the
+    # wrong diagnosis and the wrong remedy.
+    calls = []
+
+    def post(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("402 insufficient credits")
+        return _Resp({"choices": [{"message": {"content": ""}}]})
+
+    run.requests.post = post
+    _capture_annotations()
+    meta: dict = {}
+    try:
+        out = run.merge_reviews(1, "t", ["pass one", "pass two"], meta=meta)
+        assert "pass one" in out and "pass two" in out, "fallback posts the raw passes"
+        assert meta["merged"] is False
+        _ev, labels, fields = run._merge_event(7, "deadbeef", "mm", meta)
+        assert labels["outcome"] == "fallback"
+        assert fields["attempts"] == 2 and fields["merged"] is False
+        assert "402" in fields["failures"], fields
+        assert "no usable content" in fields["failures"], fields
+        # A flat string, not a list: `| json` does not promote array elements to fields.
+        assert isinstance(fields["failures"], str)
+    finally:
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_merge_event_absent_when_k_is_one():
+    # At K=1 no merge runs, and a zeroed merge event would put "0 attempts, $0" rows into
+    # the merge panels for every single-pass repo.
+    real = (run.K, run.run_pass, run.PROVIDER)
+    run.K, run.PROVIDER = 1, "openrouter"
+    real_deps = _stub_review_pr_deps()
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult("finding", "ok")
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert [e for e in events if e[0] == "merge"] == [], events
+        assert [e[0] for e in events] == ["review", "pass"], events
+    finally:
+        run.K, run.run_pass, run.PROVIDER = real
+        _restore_review_pr_deps(real_deps)
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_sweep_event_reports_config_degradation_after_the_annotation_drain():
+    # _CONFIG_ERRORS is drained so a daemon doesn't annotate red every tick — correct for
+    # annotations, wrong for monitoring: the ceiling stays inactive for the process's whole
+    # life. The sweep event must keep saying so on EVERY sweep, not just the first.
+    saved_errors = list(run._CONFIG_ERRORS)
+    saved_degraded = list(run._CONFIG_DEGRADED)
+    run._CONFIG_ERRORS[:] = ["MAX_PASS_TOKENS='5,000,000' is not a number — ignoring it"]
+    run._CONFIG_DEGRADED[:] = []
+    real = (run.resolve_model, run.write_models_json, run.open_prs)
+    run.resolve_model = lambda: "m"
+    run.write_models_json = lambda model: None
+    run.open_prs = lambda: []
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import argparse
+        import contextlib
+        import io
+        args = argparse.Namespace(pr=None, dry_run=False, force=False,
+                                  watch=True, interval=1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.sweep(args)
+            first = [e for e in events if e[0] == "sweep"][-1]
+            assert run._CONFIG_ERRORS == [], "the annotation queue must still drain"
+            assert first[2]["config_degraded"] == 1, first
+            assert "MAX_PASS_TOKENS" in first[2]["config_problems"], first
+            # Second sweep: the drain emptied _CONFIG_ERRORS, so a naive implementation
+            # reports a healthy config here while the ceiling is still inactive.
+            run.sweep(args)
+        second = [e for e in events if e[0] == "sweep"][-1]
+        assert second[2]["config_degraded"] == 1, second
+        assert "MAX_PASS_TOKENS" in second[2]["config_problems"], second
+    finally:
+        run.resolve_model, run.write_models_json, run.open_prs = real
+        run._CONFIG_ERRORS[:] = saved_errors
+        run._CONFIG_DEGRADED[:] = saved_degraded
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_sweep_event_always_carries_config_degraded_even_when_zero():
+    # An alert on config_degraded > 0 shouldn't have to distinguish "no problems" from
+    # "field absent" — Loki's `| json` yields no value at all for a missing field.
+    saved = list(run._CONFIG_DEGRADED)
+    run._CONFIG_DEGRADED[:] = []
+    real = (run.resolve_model, run.write_models_json, run.open_prs)
+    run.resolve_model = lambda: "m"
+    run.write_models_json = lambda model: None
+    run.open_prs = lambda: []
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import argparse
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.sweep(argparse.Namespace(pr=None, dry_run=False, force=False,
+                                         watch=False, interval=1))
+        sweeps = [e for e in events if e[0] == "sweep"]
+        assert sweeps and sweeps[-1][2]["config_degraded"] == 0, sweeps
+        assert "config_problems" not in sweeps[-1][2], "text only when there is one"
+    finally:
+        run.resolve_model, run.write_models_json, run.open_prs = real
+        run._CONFIG_DEGRADED[:] = saved
+        real_emit()
+        run._annotate = _REAL_ANNOTATE

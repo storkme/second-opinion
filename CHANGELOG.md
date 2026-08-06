@@ -27,11 +27,30 @@ All notable changes to this project are documented here. The format follows
   contract is "never delay the review". `emit_event()` is now a thin wrapper over it and is
   unchanged for callers; the never-raise and disabled-means-no-network contracts hold for
   both.
-- **Two dashboard panels** in `examples/grafana-dashboard.json`: *Degraded passes — what
+- **A `merge` event for the `K>1` union merge**, the one model call with no event of its
+  own. The review event's `merged: true|false` says a fallback happened but never why, and
+  pools the merge's spend — including *failed* attempts, accumulated deliberately because a
+  reasoning-burn empty 200 is the expensive failure — into the review totals. The event
+  carries `attempts`, `merged`, both failure reasons, tokens and cost, labelled
+  `outcome=merged|merged_on_retry|fallback`. `merged_on_retry` is the one worth watching:
+  a merge that fails once and recovers annotates nothing today (the warning fires only when
+  *both* attempts fail), so the leading indicator of a degrading provider exists solely as a
+  stdout line. Both reasons are kept rather than the last, for the reason the retry logic
+  already documents — a 402 then an empty 200 is credits exhaustion, a persistent condition
+  that recurs every sweep, which the last reason alone would file as "the model flaked".
+- **Sweep events now report config degradation** (`config_degraded`, plus `config_problems`
+  when non-zero). A non-numeric `MAX_PASS_TOKENS` disables that ceiling and annotates once,
+  then `_CONFIG_ERRORS` is *drained* — right for annotations, since a daemon must not red
+  every tick over one typo, but wrong for monitoring: the ceiling stays inactive for the
+  process's entire life while every sweep after the first reports a clean config. A
+  `--watch` daemon could run for weeks believing it had a spend ceiling it did not have.
+  `config_degraded` is always present, even at `0`, so an alert need not distinguish "no
+  problems" from "field absent" — Loki's `| json` yields no value at all for a missing field.
+- **Three dashboard panels** in `examples/grafana-dashboard.json`: *Degraded passes — what
   they burned* (every non-`ok` pass ranked by tokens spent before it stopped, which
-  distinguishes "the ceiling would have helped" from "it failed early anyway") and *Pass
-  duration* p50/p95. Both queries were validated against a live Loki rather than written
-  from the docs.
+  distinguishes "the ceiling would have helped" from "it failed early anyway"), *Pass
+  duration* p50/p95, and *Union merge health* by outcome. Every query was validated against
+  a live Loki rather than written from the docs.
 
 ## [1.7.0] - 2026-08-06
 

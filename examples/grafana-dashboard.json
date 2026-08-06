@@ -338,11 +338,35 @@
       }
     },
     {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Union merge health (K>1)",
+      "description": "The K>1 editorial merge. merged = first attempt worked; merged_on_retry = attempt 1 failed and the retry saved it; fallback = both failed and the raw passes were posted unmerged. Only 'fallback' annotates in CI, so merged_on_retry appearing at all is the early warning — it is the same failure, one attempt short of costing you the union. A sustained run of either is usually the provider, not chance: a 402 followed by an empty 200 is credits exhaustion, which recurs every sweep until fixed (check the 'failures' field in the forensics panel).",
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "range",
+          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"merge\", repo=~\"$repo\"}[$__auto]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      }
+    },
+    {
       "id": 11,
       "type": "logs",
       "title": "Recent events (forensics)",
       "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 44 },
       "targets": [
         {
           "refId": "A",
