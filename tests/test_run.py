@@ -1863,6 +1863,7 @@ def test_sweep_emits_one_error_review_event_and_one_sweep_event():
         _ev, labels, fields = review_events[0]
         assert labels["outcome"] == "error" and fields["pr"] == 5
         assert "gh exploded" in fields["error"]
+        assert "duration_s" in fields   # every review event carries it, error included
         _ev, labels, fields = sweep_events[0]
         assert labels["outcome"] == "silent_failure"
         assert fields["candidates"] == 1 and fields["reviewed"] == 0

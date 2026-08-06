@@ -1445,6 +1445,7 @@ def sweep(args: argparse.Namespace) -> bool:
             log(f"#{n}: head {sha[:10]} already reviewed — skipping")
             skipped_already_reviewed += 1
             continue
+        pr_t0 = time.monotonic()
         try:
             outcome = review_pr(n, title, sha, model, merge_model, args.dry_run)
             if outcome.posted:
@@ -1460,7 +1461,8 @@ def sweep(args: argparse.Namespace) -> bool:
             if not args.dry_run:
                 metrics.emit_event("review", {"repo": REPO, "outcome": "error"}, {
                     "pr": n, "sha": sha, "model": model, "provider": PROVIDER,
-                    "error": " ".join(str(e).split())[:200]})
+                    "error": " ".join(str(e).split())[:200],
+                    "duration_s": round(time.monotonic() - pr_t0, 1)})
     if not args.dry_run:
         # The skip counts reconcile candidates vs reviewed: drafts and already-reviewed
         # heads never reach review_pr (no review event), and per-PR skip events here

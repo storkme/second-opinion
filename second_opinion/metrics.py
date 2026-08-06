@@ -35,12 +35,13 @@ import requests
 LOKI_URL = os.environ.get("LOKI_URL", "").strip()
 LOKI_USER = os.environ.get("LOKI_USER", "").strip()
 LOKI_TOKEN = os.environ.get("LOKI_TOKEN", "").strip()
-# (connect, read): a scalar would let a black-holed endpoint (connection accepted,
-# never answered) hold every push for the full read budget — N+1 events per daemon
-# sweep, so the monitoring would throttle the loop it monitors. Connection-refused
-# already fails fast; this bounds the hang path's connect phase too.
+# (connect, read), both small: a stalled endpoint (connection accepted, response
+# never sent — a black-holed proxy, a saturated Loki) costs the read budget on EVERY
+# push, N+1 events per daemon sweep, so a generous budget lets the monitoring
+# throttle the loop it monitors. A push is a few hundred bytes answered in
+# milliseconds by a healthy Loki; 3s is ample. Connection-refused fails fast anyway.
 CONNECT_TIMEOUT_S = 3.05
-PUSH_TIMEOUT_S = 10
+PUSH_TIMEOUT_S = 3
 
 # "action" | "daemon" | "oneshot" — set by run.main() once the run mode is known.
 DELIVERY = "oneshot"
@@ -62,5 +63,8 @@ def emit_event(event: str, labels: dict, fields: dict) -> None:
                              timeout=(CONNECT_TIMEOUT_S, PUSH_TIMEOUT_S))
         resp.raise_for_status()
     except Exception as e:  # noqa: BLE001 — fail-soft is the module's contract
-        print(f"[{time.strftime('%H:%M:%S')}] metrics: push failed "
-              f"({' '.join(str(e).split())[:120]}) — continuing", flush=True)
+        try:
+            print(f"[{time.strftime('%H:%M:%S')}] metrics: push failed "
+                  f"({' '.join(str(e).split())[:120]}) — continuing", flush=True)
+        except Exception:  # noqa: BLE001 — a broken stdout pipe must not breach never-raise
+            pass
