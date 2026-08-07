@@ -73,7 +73,7 @@ second_opinion/
                    # discovered from LLAMA_SERVER_URL/v1/models. (was pi_models.py)
   run.py           # orchestration + CLI: review one PR / sweep all / --watch daemon loop.
                    # merge_reviews() dispatches openrouter|local. Entry point: main().
-  metrics.py       # OPTIONAL monitoring: JSON events per review/pass/sweep pushed to a Loki
+  metrics.py       # OPTIONAL monitoring: JSON events per review/pass/merge/sweep to a Loki
                    # endpoint (Grafana Cloud or self-hosted). No-op unless LOKI_URL is set;
                    # strictly fail-soft (emit_event/emit_events never raise); emitted AFTER
                    # the post. emit_events batches a review + its K pass events into ONE

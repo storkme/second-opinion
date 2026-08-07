@@ -25,6 +25,7 @@
         "datasource": { "type": "loki", "uid": "${datasource}" },
         "query": "label_values({service=\"second-opinion\"}, repo)",
         "refresh": 2,
+        "allValue": ".*",
         "multi": true,
         "includeAll": true,
         "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
@@ -42,7 +43,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(count_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"$repo\"}[$__range]))"
+          "expr": "sum(count_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"${repo:regex}\"}[$__range]))"
         }
       ],
       "options": {
@@ -70,7 +71,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(count_over_time({service=\"second-opinion\", event=\"review\", outcome=~\"degraded|error\", repo=~\"$repo\"}[$__range]))"
+          "expr": "sum(count_over_time({service=\"second-opinion\", event=\"review\", outcome=~\"degraded|error\", repo=~\"${repo:regex}\"}[$__range]))"
         }
       ],
       "options": {
@@ -104,7 +105,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap cost_usd | __error__=\"\" [$__range]))"
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap cost_usd | __error__=\"\" [$__range]))"
         }
       ],
       "options": {
@@ -133,7 +134,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap tokens | __error__=\"\" [$__range]))"
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__range]))"
         }
       ],
       "options": {
@@ -161,7 +162,7 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"$repo\"}[$__auto]))",
+          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"}[$__auto]))",
           "legendFormat": "{{outcome}}"
         }
       ],
@@ -184,7 +185,7 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "sum by (repo) (sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap cost_usd | __error__=\"\" [$__auto]))",
+          "expr": "sum by (repo) (sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap cost_usd | __error__=\"\" [$__auto]))",
           "legendFormat": "{{repo}}"
         }
       ],
@@ -207,13 +208,13 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "quantile_over_time(0.50, {service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap duration_s | __error__=\"\" [$__auto]) by ()",
+          "expr": "quantile_over_time(0.50, {service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap duration_s | __error__=\"\" [$__auto]) by ()",
           "legendFormat": "p50"
         },
         {
           "refId": "B",
           "queryType": "range",
-          "expr": "quantile_over_time(0.95, {service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap duration_s | __error__=\"\" [$__auto]) by ()",
+          "expr": "quantile_over_time(0.95, {service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap duration_s | __error__=\"\" [$__auto]) by ()",
           "legendFormat": "p95"
         }
       ],
@@ -235,7 +236,7 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "sum by (repo) (sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"$repo\"} | json | unwrap tokens | __error__=\"\" [$__auto]))",
+          "expr": "sum by (repo) (sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__auto]))",
           "legendFormat": "{{repo}}"
         }
       ],
@@ -258,7 +259,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "topk(25, sum by (repo, pr) (count_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"$repo\"} | json [$__range])))"
+          "expr": "topk(25, sum by (repo, pr) (count_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"${repo:regex}\"} | json [$__range])))"
         }
       ],
       "transformations": [{ "id": "labelsToFields", "options": {} }],
@@ -275,7 +276,7 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"sweep\", delivery=\"daemon\", repo=~\"$repo\"}[$__auto]))",
+          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"sweep\", delivery=\"daemon\", repo=~\"${repo:regex}\"}[$__auto]))",
           "legendFormat": "{{outcome}}"
         }
       ],
@@ -299,7 +300,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "topk(25, sum by (repo, pr, pass, status) (max_over_time({service=\"second-opinion\", event=\"pass\", outcome!=\"ok\", repo=~\"$repo\"} | json | unwrap tokens | __error__=\"\" [$__range])))"
+          "expr": "topk(25, sum by (repo, pr, pass, status) (max_over_time({service=\"second-opinion\", event=\"pass\", outcome!=\"ok\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__range])))"
         }
       ],
       "transformations": [{ "id": "labelsToFields", "options": {} }],
@@ -319,13 +320,13 @@
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "quantile_over_time(0.50, {service=\"second-opinion\", event=\"pass\", repo=~\"$repo\"} | json | unwrap elapsed_s | __error__=\"\" [$__auto]) by ()",
+          "expr": "quantile_over_time(0.50, {service=\"second-opinion\", event=\"pass\", repo=~\"${repo:regex}\"} | json | unwrap elapsed_s | __error__=\"\" [$__auto]) by ()",
           "legendFormat": "p50"
         },
         {
           "refId": "B",
           "queryType": "range",
-          "expr": "quantile_over_time(0.95, {service=\"second-opinion\", event=\"pass\", repo=~\"$repo\"} | json | unwrap elapsed_s | __error__=\"\" [$__auto]) by ()",
+          "expr": "quantile_over_time(0.95, {service=\"second-opinion\", event=\"pass\", repo=~\"${repo:regex}\"} | json | unwrap elapsed_s | __error__=\"\" [$__auto]) by ()",
           "legendFormat": "p95"
         }
       ],
@@ -338,16 +339,40 @@
       }
     },
     {
-      "id": 11,
-      "type": "logs",
-      "title": "Recent events (forensics)",
+      "id": 14,
+      "type": "timeseries",
+      "title": "Union merge health (K>1)",
+      "description": "The K>1 editorial merge. merged = first attempt worked; merged_on_retry = attempt 1 failed and the retry saved it; fallback = both failed and the raw passes were posted unmerged. Only 'fallback' annotates in CI, so merged_on_retry appearing at all is the early warning — it is the same failure, one attempt short of costing you the union. A sustained run of either is usually the provider, not chance: a 402 followed by an empty 200 is credits exhaustion, which recurs every sweep until fixed (check the 'failures' field in the forensics panel).",
       "datasource": { "type": "loki", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
       "targets": [
         {
           "refId": "A",
           "queryType": "range",
-          "expr": "{service=\"second-opinion\", repo=~\"$repo\"}"
+          "expr": "sum by (outcome) (count_over_time({service=\"second-opinion\", event=\"merge\", repo=~\"${repo:regex}\"}[$__auto]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "logs",
+      "title": "Recent events (forensics)",
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "range",
+          "expr": "{service=\"second-opinion\", repo=~\"${repo:regex}\"}"
         }
       ],
       "options": {

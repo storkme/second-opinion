@@ -199,9 +199,10 @@ runtime, cost, how often it degrades, how many review rounds a PR accumulates. W
 [Loki](https://grafana.com/oss/loki/) endpoint — Grafana Cloud or self-hosted, the push
 API is identical, so moving off the cloud later is a URL + credential swap.
 
-Three event types: **`review`** (one per PR reviewed), **`pass`** (one per agentic pass)
-and **`sweep`** (one per daemon cycle — the liveness signal). A review and its passes
-ride in a *single* request, so instrumenting `K` passes costs no extra round trip.
+Four event types: **`review`** (one per PR reviewed), **`pass`** (one per agentic pass),
+**`merge`** (the `K>1` union merge) and **`sweep`** (one per daemon cycle — the liveness
+signal). A review and all of its passes and merge ride in a *single* request, so the
+extra detail costs no extra round trip.
 
 ```jsonc
 // Stream labels (indexed, low-cardinality): service/delivery/repo/event/outcome —
@@ -215,6 +216,11 @@ ride in a *single* request, so instrumenting `K` passes costs no extra round tri
 // timeout across every repo: {service="second-opinion", event="pass", outcome="timeout"}
 {"event": "pass", "pr": 574, "sha": "…", "k": 3, "pass": 2, "status": "timeout",
  "tokens": 912345, "cost_usd": 0.503, "chars": 0, "elapsed_s": 1800.0}
+
+// The K>1 merge. outcome = merged | merged_on_retry | fallback.
+{"event": "merge", "pr": 574, "sha": "…", "provider": "openrouter", "merged": false,
+ "attempts": 2, "failures": "raised RuntimeError: 402 …; returned no usable content",
+ "tokens": 21000, "cost_usd": 0.011}
 ```
 
 The `review` event's `pass_statuses` says *which* pass died; the `pass` event says what
@@ -224,6 +230,13 @@ are pooled, so a pass that failed instantly and one that burned 12.6M tokens fir
 `sum(pass.tokens) ≤ review.tokens`: the difference is the `K>1` merge call, which is not
 a pass. At `K=1` a pass event is still worth having — `elapsed_s` is model time alone,
 while the review's `duration_s` also covers diff fetch, worktree setup and posting.
+
+`outcome="merged_on_retry"` is the merge signal worth alerting on: a merge that fails once
+and recovers annotates nothing in CI (the warning fires only when *both* attempts fail), so
+it is the earliest visible sign of a degrading merge provider — the same failure, one
+attempt short of costing you the union. Sweep events also carry `config_degraded` (always
+present, `0` when healthy): a mistyped `max-pass-tokens` disables that ceiling and warns
+*once*, so without this a daemon can run for weeks believing it is protected when it isn't.
 
 - **Setup (Grafana Cloud):** from your stack's Loki details page take the push URL
   (`https://logs-prod-XXX.grafana.net/loki/api/v1/push`) and the numeric instance id, and
