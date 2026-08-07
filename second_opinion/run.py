@@ -42,6 +42,10 @@ Env:
                       metrics.py); unset (default) = no metrics, no network call
   LOKI_USER           basic-auth user for LOKI_URL (Grafana Cloud: Loki instance id)
   LOKI_TOKEN          basic-auth password for LOKI_URL (Grafana Cloud: a logs:write token)
+  OTLP_ENDPOINT       optional OTLP/HTTP endpoint; one trace per review (tracing.py)
+  OTLP_USER           basic-auth user (Grafana Cloud: the numeric INSTANCE id -- note
+                      this is usually NOT the same number as LOKI_USER)
+  OTLP_TOKEN          basic-auth password for OTLP_ENDPOINT (a traces:write token)
   REPO_DIR            repo checkout (default: cwd)
 
 Usage: run.py [--pr N] [--dry-run] [--force] [--watch [--interval S]]
@@ -66,6 +70,7 @@ import requests
 
 from . import metrics
 from . import review as rv
+from . import tracing
 from .providers import DEFAULT_MODEL, pi_provider, write_models_json
 
 # GITHUB_REPOSITORY is auto-set in the Action container; the bare CLI / daemon sets
@@ -321,6 +326,10 @@ class PassResult(NamedTuple):
     status: str
     cost: float = 0.0
     tokens: int = 0
+    # Inner timeline (model turns + tool calls) reconstructed from the pi transcript,
+    # for tracing only. A tuple, not a list, because PassResult is a NamedTuple and a
+    # mutable default would be shared across every pass ever constructed.
+    timeline: tuple = ()
 
 
 DEGRADED = {"timeout", "error", "empty", "runaway"}
@@ -438,7 +447,8 @@ _REDACT_RE = re.compile(r"sk-or-v1-[A-Za-z0-9_-]+")
 
 def _secret_values() -> list:
     vals = [os.environ.get(k, "").strip()
-            for k in ("OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "LOKI_TOKEN")]
+            for k in ("OPENROUTER_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "LOKI_TOKEN",
+                      "OTLP_TOKEN")]
     return [v for v in vals if v]
 
 
@@ -550,6 +560,13 @@ def _finish_pass(model: str, session_dir: str, internal: bool, text: str, status
     and package the PassResult with cost/tokens. `prior_files` = session files that already
     existed before this pass, excluded so a shared persisted dir isn't double-counted."""
     usage = _read_session_usage(session_dir, exclude=prior_files)
+    # BEFORE the scrub below: an internal (throwaway) session dir is deleted a few lines
+    # down, and a persisted one is rewritten by redaction. This is the only moment the
+    # transcript is both complete and still on disk. Gated on tracing being configured so
+    # the parse costs nothing in the default no-tracing case.
+    timeline: tuple = ()
+    if tracing.enabled():
+        timeline = tuple(tracing.parse_timeline(session_dir, exclude=prior_files))
     if internal:
         shutil.rmtree(session_dir, ignore_errors=True)
     else:
@@ -561,7 +578,7 @@ def _finish_pass(model: str, session_dir: str, internal: bool, text: str, status
         # pi may not price a custom OpenRouter model (cost.total is 0); fall back to a
         # list-price estimate from real token counts.
         cost = _cost_from_usage(model, usage)
-    return PassResult(text, status, cost=cost, tokens=tokens)
+    return PassResult(text, status, cost=cost, tokens=tokens, timeline=timeline)
 
 
 class _UsageTail:
@@ -678,7 +695,8 @@ def _run_pass_argv(wt: str, model: str, system: str, prompt_arg: str | None,
     # models.json — chmod 600'd by providers.py — and the worktree's git config can hold
     # the checkout token. Trusting PR authors is the real boundary; see README Security.)
     env = {k: v for k, v in os.environ.items()
-           if k not in ("GITHUB_TOKEN", "GH_TOKEN", "LOKI_URL", "LOKI_USER", "LOKI_TOKEN")}
+           if k not in ("GITHUB_TOKEN", "GH_TOKEN", "LOKI_URL", "LOKI_USER", "LOKI_TOKEN",
+                        "OTLP_ENDPOINT", "OTLP_USER", "OTLP_TOKEN")}
     prior_files = _list_session_files(session_dir)
     proc = None
     try:
@@ -1282,8 +1300,30 @@ def _merge_event(pr: int, sha: str, merge_model: str, mm: dict) -> tuple:
              "tokens": mm.get("tokens", 0), "cost_usd": round(mm.get("cost", 0.0), 6)})
 
 
+def _export_trace(pr: int, sha: str, model: str, outcome: str, start_ns: int,
+                  ordered: list, elapsed: dict, mm: dict | None) -> None:
+    """Ship the review's span tree. A no-op unless OTLP_ENDPOINT is set, and fail-soft
+    inside tracing.export — but the ASSEMBLY happens here, so guard it too: building spans
+    walks every pass's timeline, and a malformed transcript must not turn a posted review
+    into an exception on the way out the door."""
+    if not tracing.enabled():
+        return
+    try:
+        spans = tracing.build_review_trace(
+            repo=REPO, pr=pr, sha=sha, model=model, provider=PROVIDER, k=K,
+            outcome=outcome, start_ns=start_ns, end_ns=time.time_ns(),
+            passes=ordered, elapsed=elapsed, merge=mm)
+        tracing.export(spans, resource_attrs={"deployment.environment": metrics.DELIVERY})
+    except Exception as e:  # noqa: BLE001 — telemetry must never break a posted review
+        log(f"tracing: assembly failed ({' '.join(str(e).split())[:120]}) — continuing")
+
+
 def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_run: bool) -> ReviewOutcome:
     t0 = time.monotonic()
+    # Wall clock too, for spans. monotonic() is the right clock for DURATIONS (it cannot
+    # jump) but it has no epoch, so it cannot say WHEN a span happened — and a trace needs
+    # both. Kept side by side rather than converting between them.
+    t0_wall_ns = time.time_ns()
     diff = _gh(["pr", "diff", str(pr)])
     globs = _exclude_globs()
     fd = rv.filter_diff(diff, globs, MAX_DIFF_CHARS)
@@ -1420,6 +1460,10 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
                     "tokens": total_tokens, "cost_usd": round(total_cost, 6),
                     "duration_s": round(time.monotonic() - t0, 1)}),
                 *_pass_events(pr, sha, model, ordered, elapsed)])
+            # Traced too: an all-passes-failed review is the one whose SHAPE is most worth
+            # seeing — three passes that each died at a different point look identical in
+            # the totals and completely different in a waterfall.
+            _export_trace(pr, sha, model, "degraded", t0_wall_ns, ordered, elapsed, None)
         return ReviewOutcome(False, True)
 
     k = len(passes)
@@ -1429,7 +1473,9 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         review_body = passes[0]
     else:
         mm = {}
+        mm["start_ns"] = time.time_ns()
         review_body = merge_reviews(pr, title, passes, merge_model, meta=mm)
+        mm["end_ns"] = time.time_ns()
         total_cost += mm.get("cost", 0.0)
         total_tokens += mm.get("tokens", 0)
         merged = mm.get("merged", True)
@@ -1504,6 +1550,7 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
             # and emitting a zeroed one would put "0 attempts, $0" rows into the merge
             # panels for every single-pass repo.
             *([_merge_event(pr, sha, merge_model, mm)] if mm is not None else [])])
+        _export_trace(pr, sha, model, "posted", t0_wall_ns, ordered, elapsed, mm)
     return ReviewOutcome(True, degraded)
 
 

@@ -39,6 +39,11 @@ services:
       LOKI_URL: ${LOKI_URL:-}
       LOKI_USER: ${LOKI_USER:-}
       LOKI_TOKEN: ${LOKI_TOKEN:-}
+      # Optional tracing: one OTLP trace per review (review > pass > turn/tool > merge).
+      # Unset = disabled, no network call, so PROVIDER=local stays fully offline.
+      OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
+      OTLP_USER: ${OTLP_USER:-}
+      OTLP_TOKEN: ${OTLP_TOKEN:-}
       INTERVAL: ${INTERVAL:-1800}
       REPO_DIR: /repo
     volumes:
