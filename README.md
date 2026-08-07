@@ -70,7 +70,7 @@ See [`examples/second-opinion.yml`](examples/second-opinion.yml) for the fuller 
 | `tools` | `read,bash` | agent tool grant; set `read` to drop shell (see Security) |
 | `reasoning` | `true` | set `false` for a non-reasoning `model` |
 | `fail-on-degraded` | `true` | fail the check when a pass degrades and posts no review ([below](#degraded-passes-fail-the-check)) |
-| `loki-url` | — (off) | optional [monitoring](#monitoring-optional): Loki push endpoint receiving one JSON event per review/sweep |
+| `loki-url` | — (off) | optional [monitoring](#monitoring-optional): Loki push endpoint receiving JSON events per review/pass/sweep |
 | `loki-user` | — | basic-auth user for `loki-url` (Grafana Cloud: the numeric Loki instance id) |
 | `loki-token` | — | basic-auth password for `loki-url` — scope it to `logs:write` only (see Security) |
 
@@ -195,9 +195,13 @@ posted) — set `FAIL_ON_DEGRADED=false` if a wrapper script needs a guaranteed-
 
 The reviewer runs autonomously, so without monitoring you can't see whether it's working:
 runtime, cost, how often it degrades, how many review rounds a PR accumulates. When
-`LOKI_URL` is set, every review and sweep pushes **one structured JSON event** to a
+`LOKI_URL` is set, every review pushes **structured JSON events** to a
 [Loki](https://grafana.com/oss/loki/) endpoint — Grafana Cloud or self-hosted, the push
 API is identical, so moving off the cloud later is a URL + credential swap.
+
+Three event types: **`review`** (one per PR reviewed), **`pass`** (one per agentic pass)
+and **`sweep`** (one per daemon cycle — the liveness signal). A review and its passes
+ride in a *single* request, so instrumenting `K` passes costs no extra round trip.
 
 ```jsonc
 // Stream labels (indexed, low-cardinality): service/delivery/repo/event/outcome —
@@ -206,7 +210,20 @@ API is identical, so moving off the cloud later is a URL + credential swap.
  "provider": "openrouter", "k": 1, "pass_statuses": "ok", "passes_ok": 1,
  "passes_degraded": 0, "merged": true, "tokens": 184000, "cost_usd": 0.031,
  "diff_chars": 41200, "diff_truncated": false, "duration_s": 412.3}
+
+// One per pass. outcome = that pass's own status, so a single selector finds every
+// timeout across every repo: {service="second-opinion", event="pass", outcome="timeout"}
+{"event": "pass", "pr": 574, "sha": "…", "k": 3, "pass": 2, "status": "timeout",
+ "tokens": 912345, "cost_usd": 0.503, "chars": 0, "elapsed_s": 1800.0}
 ```
+
+The `review` event's `pass_statuses` says *which* pass died; the `pass` event says what
+it **cost** to die. At `K=1` those are the same numbers, but at `K>1` the review totals
+are pooled, so a pass that failed instantly and one that burned 12.6M tokens first (the
+`max-pass-tokens` case) are indistinguishable without this. Note
+`sum(pass.tokens) ≤ review.tokens`: the difference is the `K>1` merge call, which is not
+a pass. At `K=1` a pass event is still worth having — `elapsed_s` is model time alone,
+while the review's `duration_s` also covers diff fetch, worktree setup and posting.
 
 - **Setup (Grafana Cloud):** from your stack's Loki details page take the push URL
   (`https://logs-prod-XXX.grafana.net/loki/api/v1/push`) and the numeric instance id, and
@@ -216,7 +233,8 @@ API is identical, so moving off the cloud later is a URL + credential swap.
   needs only the URL.
 - **Dashboard:** import [`examples/grafana-dashboard.json`](examples/grafana-dashboard.json)
   and point it at your Loki data source — reviews by outcome, cost/tokens per repo,
-  duration p50/p95, review rounds per PR, daemon liveness, and a raw event log.
+  review and pass duration p50/p95, degraded passes ranked by what they burned, review
+  rounds per PR, daemon liveness, and a raw event log.
 - **Contract:** off by default (no `LOKI_URL` = no network call, so `PROVIDER=local`
   stays fully offline), and strictly **fail-soft** — the push happens *after* the review
   is posted, and a failed push is one log line, never a degraded or failed review. The

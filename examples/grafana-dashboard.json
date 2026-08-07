@@ -289,11 +289,60 @@
       }
     },
     {
+      "id": 12,
+      "type": "table",
+      "title": "Degraded passes — what they burned",
+      "description": "Every pass that did NOT end 'ok', ranked by tokens spent before it stopped. The review event pools spend across all K passes, so it cannot distinguish a pass that died instantly from one that burned millions first (the runaway signature: 12.6M tokens, $1.96, zero output). A large number here with status=timeout is the case for max-pass-tokens; a small one means the pass failed early and a spend ceiling would not have helped.",
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "expr": "topk(25, sum by (repo, pr, pass, status) (max_over_time({service=\"second-opinion\", event=\"pass\", outcome!=\"ok\", repo=~\"$repo\"} | json | unwrap tokens | __error__=\"\" [$__range])))"
+        }
+      ],
+      "transformations": [{ "id": "labelsToFields", "options": {} }],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Pass duration",
+      "description": "Wall-clock per agentic pass. Read against 'Review duration': that panel also includes diff fetch, worktree setup, merge and post, so the gap between the two is harness overhead rather than model time. Watch for a rising curve — a pass timeout is usually the end of a latency creep, not a sudden hang.",
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "range",
+          "expr": "quantile_over_time(0.50, {service=\"second-opinion\", event=\"pass\", repo=~\"$repo\"} | json | unwrap elapsed_s | __error__=\"\" [$__auto]) by ()",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "queryType": "range",
+          "expr": "quantile_over_time(0.95, {service=\"second-opinion\", event=\"pass\", repo=~\"$repo\"} | json | unwrap elapsed_s | __error__=\"\" [$__auto]) by ()",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true },
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
       "id": 11,
       "type": "logs",
       "title": "Recent events (forensics)",
       "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
       "targets": [
         {
           "refId": "A",
