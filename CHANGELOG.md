@@ -20,9 +20,14 @@ All notable changes to this project are documented here. The format follows
   `emit_events()` batching that exists only on `main`. Consequences while it stood: this
   repo's checks never exercised the released artifact (so "verified in CI here" meant
   "verified as PR code"), and a PR could only ever be reviewed by its own reviewer. Both
-  entrypoints now pass `-P`; the image asserts at **build** time that the interpreter
-  supports it, since on an older python `-P` is an unknown option that would kill every
-  run rather than being ignored. Consumers other than this repo were unaffected.
+  entrypoints now pass `-P`, and so does the manual-sweep hint the entrypoint prints —
+  running that from inside this checkout would otherwise reintroduce the bug by hand. The
+  image reproduces the whole A/B at **build** time (a decoy package in cwd versus the real
+  one on `PYTHONPATH`) and fails the build if the decoy wins, so a base-image change that
+  silently restores shadowing cannot ship. That check is deliberately behavioural rather
+  than a version assert: on an older python `-P` is an unknown option and the process dies
+  before any assert runs, and merely checking that the flag *parses* would never prove it
+  still drops cwd. Consumers other than this repo were unaffected.
 
 ## [1.8.0] - 2026-08-07
 

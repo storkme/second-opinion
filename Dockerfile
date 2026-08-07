@@ -14,13 +14,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# The entrypoints run `python3 -P` so the reviewed checkout cannot shadow the reviewer at
-# /opt/reviewer. -P landed in 3.11, and on an older interpreter it is not ignored — it is
-# an unknown option, so every review would die at startup. Assert it here so a base-image
-# change fails the BUILD rather than every run, and check the flag itself rather than the
-# version number, which is the property actually depended on.
-RUN python3 -P -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
-
 # pi: the agentic runner. Install the exact, integrity-checked dependency graph from the
 # committed lockfile. Lifecycle scripts are disabled: pi ships built JS and needs none at
 # install time. claude is intentionally NOT installed — both the review passes and the K>1
@@ -36,4 +29,24 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1 PYTHONPATH=/opt/reviewer
+
+# Build-time proof that the reviewed checkout cannot shadow the reviewer. The entrypoints
+# rely on `-P` to keep cwd off sys.path; this reproduces the exact A/B — a decoy package
+# in cwd against the real one on PYTHONPATH — and fails the BUILD if the decoy wins.
+#
+# It deliberately checks the BEHAVIOUR, not the interpreter version: asserting >= 3.11 is
+# dead code, because on an older python `-P` is an unknown option and the process dies
+# before any assert runs. A parse check alone is also too weak — it proves the flag is
+# accepted, never that it still drops cwd. This is a tripwire for a base-image change, so
+# it should test the property actually depended on.
+RUN set -eu; \
+    mkdir -p /tmp/shadowcheck/second_opinion; \
+    printf 'DECOY = True\n' > /tmp/shadowcheck/second_opinion/__init__.py; \
+    cd /tmp/shadowcheck; \
+    python3 -P -c 'import second_opinion as m; assert not getattr(m, "DECOY", False), \
+"cwd shadowed /opt/reviewer despite -P: " + str(m.__file__)'; \
+    python3 -c 'import second_opinion as m; assert getattr(m, "DECOY", False), \
+"the decoy no longer shadows without -P, so this check proves nothing"'; \
+    rm -rf /tmp/shadowcheck
+
 ENTRYPOINT ["/entrypoint.sh"]
