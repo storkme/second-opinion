@@ -27,7 +27,9 @@ All notable changes to this project are documented here. The format follows
   silently restores shadowing cannot ship. That check is deliberately behavioural rather
   than a version assert: on an older python `-P` is an unknown option and the process dies
   before any assert runs, and merely checking that the flag *parses* would never prove it
-  still drops cwd. Consumers other than this repo were unaffected.
+  still drops cwd. Consumers other than this repo were unaffected. Note the dogfood check
+  pins `@v1` like any consumer, so it keeps running the shadowed path until this ships and
+  `v1` is retagged — the PR that fixed this was, necessarily, reviewed by the bug.
 
 ## [1.8.0] - 2026-08-07
 

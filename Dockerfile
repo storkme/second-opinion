@@ -39,14 +39,25 @@ ENV PYTHONUNBUFFERED=1 PYTHONPATH=/opt/reviewer
 # before any assert runs. A parse check alone is also too weak — it proves the flag is
 # accepted, never that it still drops cwd. This is a tripwire for a base-image change, so
 # it should test the property actually depended on.
+#
+# It runs `-m second_opinion.run`, the same form the entrypoints use, rather than a
+# convenient `-c` import: `-P` suppresses the cwd entry for both, but a guard for a
+# runtime invocation should BE that invocation. Hence the exit-code protocol — the decoy's
+# run.py exits 42, and the real one exits non-zero on the missing GITHUB_REPO, which is
+# expected here and why output is discarded.
+#
+# Both directions are asserted. Checking only that the decoy loses under -P would pass
+# vacuously if a future python stopped putting cwd first at all, leaving a green build
+# guarding nothing.
 RUN set -eu; \
     mkdir -p /tmp/shadowcheck/second_opinion; \
-    printf 'DECOY = True\n' > /tmp/shadowcheck/second_opinion/__init__.py; \
+    : > /tmp/shadowcheck/second_opinion/__init__.py; \
+    printf 'import sys; sys.exit(42)\n' > /tmp/shadowcheck/second_opinion/run.py; \
     cd /tmp/shadowcheck; \
-    python3 -P -c 'import second_opinion as m; assert not getattr(m, "DECOY", False), \
-"cwd shadowed /opt/reviewer despite -P: " + str(m.__file__)'; \
-    python3 -c 'import second_opinion as m; assert getattr(m, "DECOY", False), \
-"the decoy no longer shadows without -P, so this check proves nothing"'; \
+    rc=0; python3 -m second_opinion.run >/dev/null 2>&1 || rc=$?; \
+    [ "$rc" = 42 ] || { echo "guard is vacuous: cwd no longer shadows without -P (rc=$rc)" >&2; exit 1; }; \
+    rc=0; python3 -P -m second_opinion.run >/dev/null 2>&1 || rc=$?; \
+    [ "$rc" != 42 ] || { echo "cwd shadowed /opt/reviewer despite -P" >&2; exit 1; }; \
     rm -rf /tmp/shadowcheck
 
 ENTRYPOINT ["/entrypoint.sh"]

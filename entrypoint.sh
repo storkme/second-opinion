@@ -18,7 +18,7 @@ if [ -z "${PR_NUMBER:-}" ]; then
   echo "[second-opinion] 'pr-number' input. (To sweep all open PRs, run the CLI:" >&2
   # -P for the same reason as the exec below: run from inside a checkout that ships its
   # own second_opinion/ and an un-flagged sweep reviews with THAT copy, not this one.
-  echo "[second-opinion]  python -P -m second_opinion.run )" >&2
+  echo "[second-opinion]  python3 -P -m second_opinion.run )" >&2
   exit 1
 fi
 
