@@ -5,6 +5,25 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Fixed
+- **The reviewed checkout can no longer shadow the reviewer.** Both deliveries ran
+  `python3 -m second_opinion.run` with cwd set to the repo under review, and `-m` prepends
+  cwd to `sys.path` *ahead of* the image's `PYTHONPATH=/opt/reviewer` — so reviewing a repo
+  that ships its own top-level `second_opinion/` package silently imported that copy
+  instead of the released one. Only this repo is such a target, which made it invisible:
+  the dogfood check pinned `@v1`, logged `Download action repository … SHA e4d8891`
+  (v1.7.0), and then executed the branch's code. It surfaced only because per-pass Loki
+  events appeared for PRs reviewed by a release that contains no per-pass emission at all,
+  with a review and its pass event timestamped 26µs apart — the single-request
+  `emit_events()` batching that exists only on `main`. Consequences while it stood: this
+  repo's checks never exercised the released artifact (so "verified in CI here" meant
+  "verified as PR code"), and a PR could only ever be reviewed by its own reviewer. Both
+  entrypoints now pass `-P`; the image asserts at **build** time that the interpreter
+  supports it, since on an older python `-P` is an unknown option that would kill every
+  run rather than being ignored. Consumers other than this repo were unaffected.
+
 ## [1.8.0] - 2026-08-07
 
 ### Added

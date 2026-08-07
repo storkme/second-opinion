@@ -14,6 +14,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
+# The entrypoints run `python3 -P` so the reviewed checkout cannot shadow the reviewer at
+# /opt/reviewer. -P landed in 3.11, and on an older interpreter it is not ignored — it is
+# an unknown option, so every review would die at startup. Assert it here so a base-image
+# change fails the BUILD rather than every run, and check the flag itself rather than the
+# version number, which is the property actually depended on.
+RUN python3 -P -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+
 # pi: the agentic runner. Install the exact, integrity-checked dependency graph from the
 # committed lockfile. Lifecycle scripts are disabled: pi ships built JS and needs none at
 # install time. claude is intentionally NOT installed — both the review passes and the K>1

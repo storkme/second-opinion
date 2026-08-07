@@ -59,7 +59,11 @@ services:
         fi
         git config --global --add safe.directory /repo || true
         cd /repo
-        exec python3 -m second_opinion.run --watch --interval "${INTERVAL:-1800}"
+        # -P for the same reason as the Action entrypoint: it keeps cwd (here the cloned
+        # target repo) off sys.path, so a target that ships its own `second_opinion/`
+        # package cannot shadow the image's copy at /opt/reviewer. REPO_DIR=/repo above
+        # is what run.py actually reads, so this cd is for git's benefit, not imports.
+        exec python3 -P -m second_opinion.run --watch --interval "${INTERVAL:-1800}"
     # A llama-server on the WSL2 / host gateway is usually reachable from a bridged
     # container. If NOT: point LLAMA_SERVER_URL at http://host.docker.internal:<port>
     # and uncomment extra_hosts, or use network_mode: host (Linux host only).
