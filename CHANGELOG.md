@@ -5,6 +5,32 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Fixed
+- **The reviewed checkout can no longer shadow the reviewer.** Both deliveries ran
+  `python3 -m second_opinion.run` with cwd set to the repo under review, and `-m` prepends
+  cwd to `sys.path` *ahead of* the image's `PYTHONPATH=/opt/reviewer` — so reviewing a repo
+  that ships its own top-level `second_opinion/` package silently imported that copy
+  instead of the released one. Only this repo is such a target, which made it invisible:
+  the dogfood check pinned `@v1`, logged `Download action repository … SHA e4d8891`
+  (v1.7.0), and then executed the branch's code. It surfaced only because per-pass Loki
+  events appeared for PRs reviewed by a release that contains no per-pass emission at all,
+  with a review and its pass event timestamped 26µs apart — the single-request
+  `emit_events()` batching that exists only on `main`. Consequences while it stood: this
+  repo's checks never exercised the released artifact (so "verified in CI here" meant
+  "verified as PR code"), and a PR could only ever be reviewed by its own reviewer. Both
+  entrypoints now pass `-P`, and so does the manual-sweep hint the entrypoint prints —
+  running that from inside this checkout would otherwise reintroduce the bug by hand. The
+  image reproduces the whole A/B at **build** time (a decoy package in cwd versus the real
+  one on `PYTHONPATH`) and fails the build if the decoy wins, so a base-image change that
+  silently restores shadowing cannot ship. That check is deliberately behavioural rather
+  than a version assert: on an older python `-P` is an unknown option and the process dies
+  before any assert runs, and merely checking that the flag *parses* would never prove it
+  still drops cwd. Consumers other than this repo were unaffected. Note the dogfood check
+  pins `@v1` like any consumer, so it keeps running the shadowed path until this ships and
+  `v1` is retagged — the PR that fixed this was, necessarily, reviewed by the bug.
+
 ## [1.8.0] - 2026-08-07
 
 ### Added
