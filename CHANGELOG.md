@@ -5,15 +5,8 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
-## [Unreleased]
+## [1.8.0] - 2026-08-07
 
-### Changed
-- The example workflow now shows how to wire the v1.7.0 Loki inputs (commented out), and
-  the dogfood workflow actually uses them. The feature shipped with no worked example of
-  where the three values come from, which left "scope the token to `logs:write`" as advice
-  with nothing to copy. The pattern documented: URL and instance id are repo **variables**
-  (neither is sensitive, and an unset variable expands to `""` — so `vars.LOKI_URL` doubles
-  as the kill switch), only the token is a secret.
 ### Added
 - **A monitoring event per agentic pass**, alongside the existing per-review event. The
   review event names *which* pass degraded (`pass_statuses`, `passes_ok`,
@@ -78,6 +71,14 @@ All notable changes to this project are documented here. The format follows
   distinguishes "the ceiling would have helped" from "it failed early anyway"), *Pass
   duration* p50/p95, and *Union merge health* by outcome. Every query was validated against
   a live Loki rather than written from the docs.
+
+### Changed
+- The example workflow now shows how to wire the v1.7.0 Loki inputs (commented out), and
+  the dogfood workflow actually uses them. The feature shipped with no worked example of
+  where the three values come from, which left "scope the token to `logs:write`" as advice
+  with nothing to copy. The pattern documented: URL and instance id are repo **variables**
+  (neither is sensitive, and an unset variable expands to `""` — so `vars.LOKI_URL` doubles
+  as the kill switch), only the token is a secret.
 
 ## [1.7.0] - 2026-08-06
 
@@ -376,7 +377,8 @@ All notable changes to this project are documented here. The format follows
   - Per-project guidance file (the reviewer's "memory"), HTML-marker idempotency (no database),
     and decorrelated, advisory-never-a-gate framing.
 
-[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/storkme/second-opinion/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/storkme/second-opinion/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/storkme/second-opinion/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/storkme/second-opinion/compare/v1.4.0...v1.5.0
