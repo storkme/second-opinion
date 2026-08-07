@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Changed
+- The example workflow now shows how to wire the v1.7.0 Loki inputs (commented out), and
+  the dogfood workflow actually uses them. The feature shipped with no worked example of
+  where the three values come from, which left "scope the token to `logs:write`" as advice
+  with nothing to copy. The pattern documented: URL and instance id are repo **variables**
+  (neither is sensitive, and an unset variable expands to `""` — so `vars.LOKI_URL` doubles
+  as the kill switch), only the token is a secret.
+
 ## [1.7.0] - 2026-08-06
 
 ### Changed
