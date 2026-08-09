@@ -101,7 +101,7 @@ jobs:
         # upload and silently drop precisely the degraded transcript this step exists to
         # keep. !cancelled() covers success and failure alike, which is the point.
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: second-opinion-sessions-${{ github.event.pull_request.number }}
           path: ${{ github.workspace }}/second-opinion-sessions
