@@ -209,6 +209,33 @@ def test_build_review_trace_nests_passes_and_inner_spans():
     assert merge["status"]["code"] == tracing.STATUS_ERROR, "a fallback merge is an error"
 
 
+def test_a_caller_supplied_trace_id_is_used_for_every_span():
+    # The id is minted in run.py BEFORE the review runs, so it can ride on the Loki
+    # events as the join key from a dashboard row to the waterfall. If any span used a
+    # freshly generated id instead, that link would land on a partial trace — or nothing.
+    tid = "a1b2c3d4" * 4
+    spans = tracing.build_review_trace(
+        repo="o/r", pr=1, sha="deadbeef", model="m", provider="openrouter", k=2,
+        outcome="posted", start_ns=50, end_ns=500, trace_id=tid,
+        passes=[_pass(timeline=[{"kind": "turn", "name": "llm turn", "start_ns": 100,
+                                 "end_ns": 200, "attrs": {}, "error": False}]),
+                _pass(status="timeout", timeline=())],
+        elapsed={0: 0.1, 1: 0.2},
+        merge={"start_ns": 300, "end_ns": 400, "attempts": 1, "merged": True,
+               "failures": "", "tokens": 10, "cost": 0.5})
+    assert {s["traceId"] for s in spans} == {tid}
+    assert len(spans) == 5, "root + 2 passes + 1 turn + merge — nothing orphaned"
+
+
+def test_build_review_trace_still_mints_its_own_id_when_none_is_given():
+    # Standalone use (and the older call shape) must keep working.
+    spans = tracing.build_review_trace(
+        repo="o/r", pr=1, sha="c0ffee", model="m", provider="openrouter", k=1,
+        outcome="posted", start_ns=0, end_ns=10, passes=[_pass()], elapsed={0: 0.01})
+    ids = {s["traceId"] for s in spans}
+    assert len(ids) == 1 and len(ids.pop()) == 32
+
+
 def test_build_review_trace_omits_merge_at_k1_and_marks_degraded_root():
     spans = tracing.build_review_trace(
         repo="o/r", pr=1, sha="c0ffee", model="m", provider="openrouter", k=1,

@@ -1860,6 +1860,67 @@ def test_review_and_pass_events_ride_one_push():
         run._annotate = _REAL_ANNOTATE
 
 
+def test_every_event_carries_the_id_of_the_trace_that_was_exported():
+    # The join key. A dashboard row links to a waterfall by putting `trace_id` in the
+    # Loki event, so the id on the events and the id on the exported spans have to be
+    # the SAME id — that is the entire mechanism, and nothing else checks it end to end.
+    real = (run.K, run.run_pass, run.PROVIDER)
+    run.K, run.PROVIDER = 2, "local"
+    real_deps = _stub_review_pr_deps()
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult(
+        "finding", "ok", cost=0.01, tokens=100)
+    real_merge = run.merge_reviews
+    run.merge_reviews = lambda pr, title, passes, model, meta=None: "merged body"
+    events, real_emit = _capture_metrics()
+    exported = []
+    real_tracing = (run.tracing.enabled, run.tracing.export)
+    run.tracing.enabled = lambda: True
+    run.tracing.export = lambda spans, resource_attrs=None: exported.append(spans)
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=False)
+        ids = {f.get("trace_id") for _ev, _lab, f in events}
+        assert len(ids) == 1 and None not in ids, f"every event needs the id: {events}"
+        assert {s["traceId"] for s in exported[0]} == ids, "events point at another trace"
+    finally:
+        run.K, run.run_pass, run.PROVIDER = real
+        run.merge_reviews = real_merge
+        _restore_review_pr_deps(real_deps)
+        run.tracing.enabled, run.tracing.export = real_tracing
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_no_trace_id_field_when_tracing_is_off():
+    # Absent, not blank. The dashboard turns this field into a link, so a row carrying an
+    # id for a trace that was never exported is a dead link — worse than no link, because
+    # it reads as "the trace is missing" rather than "tracing is off".
+    real = (run.K, run.run_pass, run.PROVIDER)
+    run.K, run.PROVIDER = 1, "openrouter"
+    real_deps = _stub_review_pr_deps()
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult("finding", "ok")
+    events, real_emit = _capture_metrics()
+    real_enabled = run.tracing.enabled
+    run.tracing.enabled = lambda: False
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(9, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert events, "the review event should still be emitted"
+        assert all("trace_id" not in f for _ev, _lab, f in events), events
+    finally:
+        run.K, run.run_pass, run.PROVIDER = real
+        _restore_review_pr_deps(real_deps)
+        run.tracing.enabled = real_enabled
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
 def test_review_pr_dry_run_emits_no_metrics_events():
     # A --dry-run is a preview, not a review — it must not pollute the dashboard's
     # counts or costs.

@@ -54,6 +54,17 @@ jobs:
           loki-url: ${{ vars.LOKI_URL }}
           loki-user: ${{ vars.LOKI_USER }}
           loki-token: ${{ secrets.LOKI_TOKEN }}
+          # Optional tracing, same kill-switch shape as the Loki wiring above: unset
+          # vars.OTLP_ENDPOINT expands to "" and tracing makes no network call at all.
+          # Wired but INERT until those three exist on the repo — this is the plumbing,
+          # not the switch. NB the OTLP user is the STACK id, which is a different number
+          # from LOKI_USER (the Loki instance id); using one for the other 401s.
+          # Worth turning on here despite this repo's low volume: reviews of our own PRs
+          # run 500-800s, and the events can only say that, not which pass or which turn
+          # spent it. Also the only way a trace_id reaches the dashboard rows.
+          otlp-endpoint: ${{ vars.OTLP_ENDPOINT }}
+          otlp-user: ${{ vars.OTLP_USER }}
+          otlp-token: ${{ secrets.OTLP_TOKEN }}
           # This repo's own PRs outgrew the 900s default: an agentic pass on a large diff
           # with a reasoning model hits the wall and reds the check as degraded, with no
           # review — reviewer malfunction reported as if it were a verdict. Observed on

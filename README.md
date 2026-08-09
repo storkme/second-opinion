@@ -250,7 +250,9 @@ present, `0` when healthy): a mistyped `max-pass-tokens` disables that ceiling a
 - **Dashboard:** import [`examples/grafana-dashboard.json`](examples/grafana-dashboard.json)
   and point it at your Loki data source — reviews by outcome, cost/tokens per repo,
   review and pass duration p50/p95, degraded passes ranked by what they burned, review
-  rounds per PR, daemon liveness, and a raw event log.
+  rounds per PR, daemon liveness, and a raw event log. It also asks for a **Tempo** data
+  source, used only by the trace links in the two tables; leave it unset if you don't run
+  [tracing](#tracing-optional) and every other panel is unaffected.
 - **Contract:** off by default (no `LOKI_URL` = no network call, so `PROVIDER=local`
   stays fully offline), and strictly **fail-soft** — the push happens *after* the review
   is posted, and a failed push is one log line, never a degraded or failed review. The
@@ -298,6 +300,50 @@ so `PROVIDER=local` stays fully offline), exported *after* the review is posted,
 strictly **fail-soft** — a failed export is one log line, never a degraded review. No
 OpenTelemetry SDK is pulled in; the exporter is OTLP/JSON over the `requests` dependency
 the project already has.
+
+### Finding the trace for a review
+
+A trace you can't navigate to is a trace you won't read, so each review's **trace id** is
+published in three places — pick whichever you're already standing in:
+
+- **The dashboard.** *Slowest reviews — click a trace id for the waterfall* lists recent
+  traced reviews, longest first; the trace id links straight into Explore. The *Degraded
+  passes* table links the same way, which is usually the one you want: the tokens column
+  says how much a pass burned, the waterfall says on which turn it stopped. Both need the
+  **Tempo data source** variable set at the top of the dashboard.
+- **The Loki events.** Every `review`, `pass` and `merge` event for a traced review carries
+  a `trace_id` field, so anything you can filter in LogQL you can pivot to a trace:
+  `{service="second-opinion", event="review"} | json | pr="601" | line_format "{{.trace_id}}"`.
+  The field is **absent, not blank, when tracing is off**, so a row that has one means a
+  trace was exported for that review — barring an export that failed at the wire, which
+  the run log records next to the id.
+- **The run log.** `#601: trace 363d7c2a236ac72da7939314f29711af`, printed after the export.
+  This is the fallback that needs no Loki and no dashboard, and it's already on screen when
+  a check goes red. The id is not a secret — it's useless without credentials for your stack.
+
+Or search Tempo directly. These are TraceQL, run against real review traces:
+
+```traceql
+# every review of one PR (a force-push earns a new trace, so expect several)
+{resource.service.name="second-opinion" && span.pr=601}
+
+# reviews that malfunctioned — the runtime twin of the fail-on-degraded tripwire
+{resource.service.name="second-opinion" && name="review" && span.outcome!="posted"}
+
+# what a review cost and how it was configured, without opening it
+{resource.service.name="second-opinion" && name="review"} | select(span.repo, span.pr, span.k, span.outcome)
+
+# the slow turns — this is where review latency actually lives
+{resource.service.name="second-opinion" && name="llm turn" && duration>60s} | select(span.gen_ai.usage.output_tokens, span.stop_reason)
+
+# tool calls the agent got errors from: what it tried to look at and couldn't
+{resource.service.name="second-opinion" && name=~"tool .*" && status=error}
+```
+
+That fourth query is the one that pays for tracing. On a real k=3 review it surfaced a
+99-second `llm turn` that emitted **zero** output tokens and ended `stop_reason=error` —
+a minute and a half of wall clock spent on a turn that produced nothing, which the totals
+record only as "the review was slow".
 
 ## Security
 
