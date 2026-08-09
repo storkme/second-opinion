@@ -1235,7 +1235,27 @@ def _post_failure_notice(pr: int, sha: str, dry_run: bool, checkout: bool = Fals
             pass
 
 
-def _pass_events(pr: int, sha: str, model: str, ordered: list, elapsed: dict) -> list:
+def _trace_fields(trace_id: str) -> dict:
+    """The join key from a Loki row to its Tempo trace, when there is one.
+
+    Omitted entirely — not emitted blank — when tracing is off, because the dashboard
+    links this field straight into Explore: a row carrying an id for a trace nobody ever
+    tried to export is a dead link, which is strictly worse than no link at all. That is
+    also why the id is minted only when tracing.enabled(); see review_pr.
+
+    It is a link to an ATTEMPTED trace, not a guaranteed one. Events are pushed before
+    the span export (the review is posted before either), so an export that fails at the
+    wire leaves a row pointing at a trace Tempo never received. That is the fail-soft
+    contract showing through rather than a hole to plug: the alternative is holding the
+    events back until the trace lands, which buys a rarely-wrong link at the cost of
+    losing BOTH signals whenever the collector is down. The failed export says so in the
+    run log, right next to the id.
+    """
+    return {"trace_id": trace_id} if trace_id else {}
+
+
+def _pass_events(pr: int, sha: str, model: str, ordered: list, elapsed: dict,
+                 trace_id: str = "") -> list:
     """One monitoring event per agentic pass, as (event, labels, fields) triples for
     metrics.emit_events.
 
@@ -1263,11 +1283,15 @@ def _pass_events(pr: int, sha: str, model: str, ordered: list, elapsed: dict) ->
              {"pr": pr, "sha": sha, "model": model, "provider": PROVIDER, "k": K,
               "pass": i + 1, "status": r.status, "tokens": r.tokens,
               "cost_usd": round(r.cost, 6), "chars": len(r.text),
-              "elapsed_s": round(elapsed.get(i, 0.0), 1)})
+              "elapsed_s": round(elapsed.get(i, 0.0), 1),
+              # Same trace as the review event: a degraded pass is the row you most want
+              # to open a waterfall from, and it is reached from the pass panels, not the
+              # review ones. The pass's own span is inside that trace.
+              **_trace_fields(trace_id)})
             for i, r in enumerate(ordered)]
 
 
-def _merge_event(pr: int, sha: str, merge_model: str, mm: dict) -> tuple:
+def _merge_event(pr: int, sha: str, merge_model: str, mm: dict, trace_id: str = "") -> tuple:
     """The K>1 union merge, as one (event, labels, fields) triple.
 
     The merge is the one model call with no event of its own. The review event carries
@@ -1297,11 +1321,12 @@ def _merge_event(pr: int, sha: str, merge_model: str, mm: dict) -> tuple:
              # Joined, not a list: keeps the line flat for `| json`, which does not
              # promote array elements into queryable fields.
              "failures": "; ".join(failures)[:300],
-             "tokens": mm.get("tokens", 0), "cost_usd": round(mm.get("cost", 0.0), 6)})
+             "tokens": mm.get("tokens", 0), "cost_usd": round(mm.get("cost", 0.0), 6),
+             **_trace_fields(trace_id)})
 
 
 def _export_trace(pr: int, sha: str, model: str, outcome: str, start_ns: int,
-                  ordered: list, elapsed: dict, mm: dict | None) -> None:
+                  ordered: list, elapsed: dict, mm: dict | None, trace_id: str) -> None:
     """Ship the review's span tree. A no-op unless OTLP_ENDPOINT is set, and fail-soft
     inside tracing.export — but the ASSEMBLY happens here, so guard it too: building spans
     walks every pass's timeline, and a malformed transcript must not turn a posted review
@@ -1312,8 +1337,13 @@ def _export_trace(pr: int, sha: str, model: str, outcome: str, start_ns: int,
         spans = tracing.build_review_trace(
             repo=REPO, pr=pr, sha=sha, model=model, provider=PROVIDER, k=K,
             outcome=outcome, start_ns=start_ns, end_ns=time.time_ns(),
-            passes=ordered, elapsed=elapsed, merge=mm)
+            passes=ordered, elapsed=elapsed, merge=mm, trace_id=trace_id)
         tracing.export(spans, resource_attrs={"deployment.environment": metrics.DELIVERY})
+        # The id, in the run log, unconditionally. The Loki field and the dashboard link
+        # are the ergonomic path, but they need Loki configured AND the push to have
+        # succeeded; the job log is already where you are when a check goes red, and it
+        # survives both. Non-sensitive: an id is useless without stack credentials.
+        log(f"#{pr}: trace {trace_id}")
     except Exception as e:  # noqa: BLE001 — telemetry must never break a posted review
         log(f"tracing: assembly failed ({' '.join(str(e).split())[:120]}) — continuing")
 
@@ -1324,6 +1354,11 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     # jump) but it has no epoch, so it cannot say WHEN a span happened — and a trace needs
     # both. Kept side by side rather than converting between them.
     t0_wall_ns = time.time_ns()
+    # Minted here, not in build_review_trace, so the id exists before the work does and
+    # can be published alongside it: it rides on every Loki event for this review, which
+    # is what turns a dashboard row into a link to the waterfall. Empty when tracing is
+    # off — see _trace_fields for why an id without a trace is worse than none.
+    trace_id = tracing.new_trace_id() if tracing.enabled() else ""
     diff = _gh(["pr", "diff", str(pr)])
     globs = _exclude_globs()
     fd = rv.filter_diff(diff, globs, MAX_DIFF_CHARS)
@@ -1458,12 +1493,14 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
                     "reason": "no_output", "k": K,
                     "pass_statuses": ",".join(r.status for r in ordered),
                     "tokens": total_tokens, "cost_usd": round(total_cost, 6),
-                    "duration_s": round(time.monotonic() - t0, 1)}),
-                *_pass_events(pr, sha, model, ordered, elapsed)])
+                    "duration_s": round(time.monotonic() - t0, 1),
+                    **_trace_fields(trace_id)}),
+                *_pass_events(pr, sha, model, ordered, elapsed, trace_id)])
             # Traced too: an all-passes-failed review is the one whose SHAPE is most worth
             # seeing — three passes that each died at a different point look identical in
             # the totals and completely different in a waterfall.
-            _export_trace(pr, sha, model, "degraded", t0_wall_ns, ordered, elapsed, None)
+            _export_trace(pr, sha, model, "degraded", t0_wall_ns, ordered, elapsed, None,
+                          trace_id)
         return ReviewOutcome(False, True)
 
     k = len(passes)
@@ -1544,13 +1581,14 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
                 "merged": merged, "tokens": total_tokens,
                 "cost_usd": round(total_cost, 6),
                 "diff_chars": len(filtered), "diff_truncated": fd.truncated,
-                "duration_s": round(time.monotonic() - t0, 1)}),
-            *_pass_events(pr, sha, model, ordered, elapsed),
+                "duration_s": round(time.monotonic() - t0, 1),
+                **_trace_fields(trace_id)}),
+            *_pass_events(pr, sha, model, ordered, elapsed, trace_id),
             # Only when a merge actually ran (K>1). At K=1 there is no merge to describe,
             # and emitting a zeroed one would put "0 attempts, $0" rows into the merge
             # panels for every single-pass repo.
-            *([_merge_event(pr, sha, merge_model, mm)] if mm is not None else [])])
-        _export_trace(pr, sha, model, "posted", t0_wall_ns, ordered, elapsed, mm)
+            *([_merge_event(pr, sha, merge_model, mm, trace_id)] if mm is not None else [])])
+        _export_trace(pr, sha, model, "posted", t0_wall_ns, ordered, elapsed, mm, trace_id)
     return ReviewOutcome(True, degraded)
 
 

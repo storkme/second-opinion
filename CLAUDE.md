@@ -83,6 +83,10 @@ second_opinion/
                    # Inner spans are reconstructed from pi's JSONL transcript, which is the
                    # only way to see tool calls -- pi has no OTLP of its own. No-op unless
                    # OTLP_ENDPOINT is set; never raises; exported AFTER the post.
+                   # The trace id is minted by run.py BEFORE the review (not inside the
+                   # exporter) so it can be published as the join key: a `trace_id` field
+                   # on every Loki event + a run-log line. Without that, a trace is
+                   # correct but unreachable -- which is what 1.8.0 shipped.
   bootstrap.py     # OFFLINE tool: mine a repo's PR-review history → draft a review-guidance.md
                    # (one strong-model synthesis call; reuses run._chat + DEFAULT_MODEL). Mines
                    # the pulls API (reviewer findings), not the issues stream it posts to —
@@ -143,7 +147,7 @@ agentic path never used.
 | `FAIL_ON_DEGRADED` | `true` | exit `2` when a degraded pass (timeout / non-zero pi exit / empty output / failed head-checkout) posts no review; `false` restores always-green |
 | `LOKI_URL` | — (off) | optional monitoring: Loki push endpoint receiving JSON events per review / per pass / per sweep (`metrics.py`). Unset = no metrics, no network call — `PROVIDER=local` stays fully offline. Fail-soft: a failed push never degrades a review. |
 | `LOKI_USER` / `LOKI_TOKEN` | — | basic auth for `LOKI_URL` (Grafana Cloud: instance id / a `logs:write`-scoped token). The token is stripped from the pi subprocess env and scrubbed from persisted transcripts, like the other secrets. |
-| `OTLP_ENDPOINT` | — (off) | optional tracing: OTLP/HTTP endpoint receiving one trace per review — `review` › `pass` › `llm turn`/`tool` › `merge` (`tracing.py`). Answers "where did the time go", which the Loki events cannot: a measured review was **generation-bound at ~48 tok/s**, with tool calls totalling 0.06s of 194s. Unset = no tracing, no network call. |
+| `OTLP_ENDPOINT` | — (off) | optional tracing: OTLP/HTTP endpoint receiving one trace per review — `review` › `pass` › `llm turn`/`tool` › `merge` (`tracing.py`). Answers "where did the time go", which the Loki events cannot: a measured review was **generation-bound at ~48 tok/s**, with tool calls totalling 0.06s of 194s. Unset = no tracing, no network call. When set, the review's trace id also rides every Loki event as `trace_id` and is printed to the run log, which is how a dashboard row (or a red check) reaches its waterfall. |
 | `OTLP_USER` / `OTLP_TOKEN` | — | basic auth for `OTLP_ENDPOINT` (Grafana Cloud: the numeric **instance** id — usually **not** the same number as `LOKI_USER` — and a `traces:write`-scoped token). Stripped from the pi subprocess and scrubbed from transcripts like the other secrets. |
 | `REPO_DIR` | cwd | the target repo checkout |
 

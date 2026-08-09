@@ -5,6 +5,33 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Added
+- **A way to get *to* a review's trace.** Tracing (1.8.0) exported a correct span tree
+  that nothing could navigate to: the trace id was minted deep inside the exporter, never
+  published, and never derivable — so a slow review on the dashboard and its waterfall in
+  Tempo were two disconnected facts about the same 726 seconds. The id is now minted
+  before the review runs and published three ways: as a `trace_id` field on every
+  `review`/`pass`/`merge` Loki event, as a `#N: trace <id>` line in the run log (the
+  fallback that needs neither Loki nor a dashboard, and is already on screen when a check
+  goes red), and as a click-through link in the dashboard. The field is **absent, not
+  blank, when tracing is off**, so the link is never dead by construction — only by a
+  failed export, which the run log records next to the id. Ids stay random per review rather than derived from the head
+  SHA, so a `--force` re-review is its own trace instead of colliding into an unreadable
+  merged one.
+- **Dashboard: *Slowest reviews — click a trace id for the waterfall*.** Recent traced
+  reviews, longest first, each linking into Explore; the *Degraded passes* table links the
+  same way, which is the more useful one — its tokens column says how much a pass burned,
+  the waterfall says on which turn it stopped. Both go through a new **Tempo data source**
+  dashboard variable, so no stack-specific uid is baked into the exported JSON; leave it
+  unset and every other panel behaves exactly as before.
+- **README: "Finding the trace for a review"** — the three lookup paths plus a TraceQL
+  cookbook (by PR, malfunctioning reviews, slow turns, errored tool calls), each query run
+  against real review traces rather than written from the schema. The slow-turn query is
+  the one that pays for tracing: it surfaced a 99-second `llm turn` that emitted zero
+  output tokens and ended `stop_reason=error`, which the totals record only as "slow".
+
 ## [1.8.1] - 2026-08-07
 
 ### Fixed

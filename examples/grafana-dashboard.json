@@ -1,5 +1,5 @@
 {
-  "__comment": "second-opinion monitoring dashboard. Import via Grafana → Dashboards → Import, then pick your Loki data source. Expects the reviewer's Loki events (set LOKI_URL / loki-url; see README 'Monitoring'). Works against Grafana Cloud Loki and self-hosted Loki alike.",
+  "__comment": "second-opinion monitoring dashboard. Import via Grafana → Dashboards → Import, then pick your Loki data source. Expects the reviewer's Loki events (set LOKI_URL / loki-url; see README 'Monitoring'). Works against Grafana Cloud Loki and self-hosted Loki alike. The Tempo data source is optional and only powers the trace links in the two tables — leave it unset unless you also run tracing (otlp-endpoint).",
   "title": "second-opinion",
   "uid": "second-opinion",
   "tags": ["second-opinion", "code-review"],
@@ -15,6 +15,15 @@
         "label": "Loki data source",
         "type": "datasource",
         "query": "loki",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "__comment": "Only the trace links use this. Tracing is opt-in (otlp-endpoint), so leave it unset if you don't run it — every panel here queries Loki and works regardless. A datasource variable rather than a hardcoded uid because Tempo uids differ per stack.",
+        "name": "tempo",
+        "label": "Tempo data source (for trace links)",
+        "type": "datasource",
+        "query": "tempo",
         "current": {},
         "hide": 0
       },
@@ -293,20 +302,36 @@
       "id": 12,
       "type": "table",
       "title": "Degraded passes — what they burned",
-      "description": "Every pass that did NOT end 'ok', ranked by tokens spent before it stopped. The review event pools spend across all K passes, so it cannot distinguish a pass that died instantly from one that burned millions first (the runaway signature: 12.6M tokens, $1.96, zero output). A large number here with status=timeout is the case for max-pass-tokens; a small one means the pass failed early and a spend ceiling would not have helped.",
+      "description": "Every pass that did NOT end 'ok', ranked by tokens spent before it stopped. The review event pools spend across all K passes, so it cannot distinguish a pass that died instantly from one that burned millions first (the runaway signature: 12.6M tokens, $1.96, zero output). A large number here with status=timeout is the case for max-pass-tokens; a small one means the pass failed early and a spend ceiling would not have helped. Click the trace id to see WHERE it stopped — the tokens say how much it burned, the waterfall says on which turn. Blank trace column = tracing was off for that repo.",
       "datasource": { "type": "loki", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
       "targets": [
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "topk(25, sum by (repo, pr, pass, status) (max_over_time({service=\"second-opinion\", event=\"pass\", outcome!=\"ok\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__range])))"
+          "expr": "topk(25, sum by (repo, pr, pass, status, trace_id) (max_over_time({service=\"second-opinion\", event=\"pass\", outcome!=\"ok\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__range])))"
         }
       ],
       "transformations": [{ "id": "labelsToFields", "options": {} }],
       "fieldConfig": {
         "defaults": { "unit": "short", "decimals": 0 },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "trace_id" },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open the trace in Explore",
+                    "targetBlank": true,
+                    "url": "/explore?left={\"datasource\":\"${tempo}\",\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"tempo\",\"uid\":\"${tempo}\"},\"queryType\":\"traceql\",\"query\":\"${__value.raw}\"}],\"range\":{\"from\":\"${__from}\",\"to\":\"${__to}\"}}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
       }
     },
     {
@@ -363,11 +388,54 @@
       }
     },
     {
+      "id": 15,
+      "type": "table",
+      "title": "Slowest reviews — click a trace id for the waterfall",
+      "description": "The way in to a single review's shape. The events tell you a review took 726s; the trace tells you where the 726s went — which pass, which model turn, how many output tokens it was emitting at the time. Ranked slowest first, because that is the review worth opening. Empty unless tracing is on (otlp-endpoint): the trace id is the join key between these events and Tempo, and it is only emitted when a trace was actually exported, so a row here always has a trace behind it. Links need the Tempo data source variable set at the top.",
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "expr": "topk(25, sum by (repo, pr, outcome, trace_id) (max_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | trace_id != \"\" | unwrap duration_s | __error__=\"\" [$__range])))"
+        }
+      ],
+      "transformations": [
+        { "id": "labelsToFields", "options": {} },
+        { "id": "organize", "options": { "renameByName": { "Value": "duration" } } }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "noValue": "No traced reviews in this range. Tracing is opt-in — set otlp-endpoint (see README 'Tracing')."
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "trace_id" },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open the trace in Explore",
+                    "targetBlank": true,
+                    "url": "/explore?left={\"datasource\":\"${tempo}\",\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"tempo\",\"uid\":\"${tempo}\"},\"queryType\":\"traceql\",\"query\":\"${__value.raw}\"}],\"range\":{\"from\":\"${__from}\",\"to\":\"${__to}\"}}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "id": 11,
       "type": "logs",
       "title": "Recent events (forensics)",
       "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 44 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 52 },
       "targets": [
         {
           "refId": "A",

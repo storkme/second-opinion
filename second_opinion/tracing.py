@@ -242,11 +242,21 @@ def parse_timeline(session_dir: str, exclude=()) -> list:
 
 def build_review_trace(*, repo: str, pr: int, sha: str, model: str, provider: str,
                        k: int, outcome: str, start_ns: int, end_ns: int,
-                       passes: list, elapsed: dict, merge: dict | None = None) -> list:
+                       passes: list, elapsed: dict, merge: dict | None = None,
+                       trace_id: str | None = None) -> list:
     """Assemble the span tree for one review.
 
     `passes` is the ordered PassResult list, `elapsed` maps pass index -> seconds, and
     `merge` (optional) is {start_ns, end_ns, attempts, merged, failures, tokens, cost}.
+
+    `trace_id` is supplied by the caller so the id can be published BEFORE the trace is
+    built — run.py mints it at the top of a review and puts it in the log line and the
+    Loki event, which is the only way anything outside Tempo can name this trace. Minted
+    here when omitted, which keeps the function usable on its own.
+
+    Deliberately random per review rather than derived from repo+sha: --force and a
+    re-run on the same head SHA are separate reviews, and a derived id would collide
+    them into one unreadable trace.
 
     Pass span timing prefers the transcript: its first and last entry are real wall-clock
     instants, whereas start_ns + elapsed is an inference that drifts by whatever the
@@ -258,7 +268,7 @@ def build_review_trace(*, repo: str, pr: int, sha: str, model: str, provider: st
     point: the waterfall shows the fan-out directly, and a single straggler is obvious in
     a way "pass_statuses: ok,timeout,ok" never is.
     """
-    trace_id = new_trace_id()
+    trace_id = trace_id or new_trace_id()
     root_id = new_span_id()
     spans = [span("review", trace_id, root_id, None, start_ns, end_ns,
                   attrs={"repo": repo, "pr": pr, "sha": sha, "model": model,
