@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
-## [Unreleased]
+## [1.8.2] - 2026-08-09
 
 ### Added
 - **A way to get *to* a review's trace.** Tracing (1.8.0) exported a correct span tree
@@ -430,7 +430,8 @@ All notable changes to this project are documented here. The format follows
   - Per-project guidance file (the reviewer's "memory"), HTML-marker idempotency (no database),
     and decorrelated, advisory-never-a-gate framing.
 
-[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.8.1...HEAD
+[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.8.2...HEAD
+[1.8.2]: https://github.com/storkme/second-opinion/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/storkme/second-opinion/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/storkme/second-opinion/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/storkme/second-opinion/compare/v1.6.0...v1.7.0
