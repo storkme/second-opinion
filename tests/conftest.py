@@ -9,3 +9,8 @@ os.environ.setdefault(
     "PI_MODELS_PATH",
     os.path.join(tempfile.gettempdir(), "second-opinion-test-models.json"),
 )
+
+# The trivial-delta gate reads its flag once, at import. The suite asserts the SHIPPED
+# default (off) and sets the module global directly when it wants it on, so a developer
+# who happens to export SKIP_TRIVIAL_DELTAS must not change what the tests measure.
+os.environ.pop("SKIP_TRIVIAL_DELTAS", None)

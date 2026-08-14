@@ -38,6 +38,9 @@ Env:
   PI_REASONING        whether the model is a reasoning model (default true)
   FAIL_ON_DEGRADED    exit 2 when a degraded pass posts no review (default true; set
                       false for the old always-green behavior)
+  SKIP_TRIVIAL_DELTAS skip the review when every change since the last REVIEWED head is
+                      docs/comment-only, posting a skip comment instead (default false)
+  TRIVIAL_GLOBS       comma-separated globs treated as prose by that gate (default **/*.md)
   LOKI_URL            optional: Loki push endpoint for runtime metrics events (see
                       metrics.py); unset (default) = no metrics, no network call
   LOKI_USER           basic-auth user for LOKI_URL (Grafana Cloud: Loki instance id)
@@ -68,6 +71,7 @@ from typing import NamedTuple
 
 import requests
 
+from . import delta
 from . import metrics
 from . import review as rv
 from . import tracing
@@ -144,6 +148,23 @@ FAIL_ON_DEGRADED = (os.environ.get("FAIL_ON_DEGRADED", "true").strip().lower()
                     in ("1", "true", "yes", "on"))
 MARKER = "<!-- second-opinion sha={sha} -->"
 FAIL_MARKER = "<!-- second-opinion-failed sha={sha} -->"
+# A skipped push gets a marker of its OWN, and that is the load-bearing detail of the
+# whole trivial-delta gate rather than a cosmetic one. The baseline the gate measures
+# against is the newest MARKER — a head a review was actually posted for — so a skip
+# deliberately fails to advance it and trivial deltas ACCUMULATE: the first push whose
+# cumulative delta since the last real review touches code buys a review of all of it.
+# Reusing MARKER here would make each doc push its own baseline, and a code change could
+# then ride in behind a chain of them, each individually trivial.
+SKIP_MARKER = "<!-- second-opinion-skip sha={sha} -->"
+# Off by default: skipping a review is a decision about what a repo's pushes MEAN, which
+# only the repo can make. With it off nothing below runs and no extra API call is made.
+SKIP_TRIVIAL_DELTAS = (os.environ.get("SKIP_TRIVIAL_DELTAS", "false").strip().lower()
+                       in ("1", "true", "yes", "on"))
+# The escape hatch, checked before anything else: label the PR and every push gets a full
+# review again. It exists because the gate's rules are syntactic and a human may know
+# something they cannot see — "this comment WAS the bug", "re-run it, the last review was
+# truncated".
+FORCE_REVIEW_LABEL = "force-review"
 # GitHub rejects an issue/PR comment body over 65536 characters. Nothing upstream bounds
 # the posted review (MAX_DIFF_CHARS caps the *input*), and an over-cap body 422s on post →
 # the exception leaves review_pr → sweep files it as a silent failure → exit 2 with no
@@ -246,6 +267,14 @@ def _exclude_globs() -> list[str]:
     return rv.DEFAULT_EXCLUDE_GLOBS
 
 
+def _trivial_globs() -> list[str]:
+    """Paths the trivial-delta gate treats as prose. Same glob syntax as EXCLUDE_GLOBS."""
+    raw = os.environ.get("TRIVIAL_GLOBS", "").strip()
+    if raw:
+        return [g.strip() for g in raw.split(",") if g.strip()]
+    return delta.DEFAULT_TRIVIAL_GLOBS
+
+
 def _gh(args: list[str], timeout_s: int = 60) -> str:
     env = {**os.environ, "GH_TOKEN": TOKEN}
     try:
@@ -296,26 +325,193 @@ def _merge_model_for(model: str) -> str:
     return MODEL  # openrouter merge → an OpenRouter model id
 
 
+# `labels` rides along on the listing rather than costing its own request: the only
+# consumer is the trivial-delta gate's force-review escape hatch, and one more field on a
+# call already being made is cheaper than a per-PR lookup — including when the gate is
+# off, where the field is simply never read.
+PR_FIELDS = "number,title,headRefOid,isDraft,labels"
+
+
 def open_prs() -> list[dict]:
-    out = _gh(["pr", "list", "--state", "open", "--limit", "200",
-               "--json", "number,title,headRefOid,isDraft"])
+    out = _gh(["pr", "list", "--state", "open", "--limit", "200", "--json", PR_FIELDS])
     return [r for r in json.loads(out) if not r["isDraft"]]
 
 
 def pr_meta(n: int) -> dict:
-    return json.loads(_gh(["pr", "view", str(n), "--json",
-                           "number,title,headRefOid,isDraft"]))
+    return json.loads(_gh(["pr", "view", str(n), "--json", PR_FIELDS]))
 
 
-def already_reviewed(n: int, sha: str) -> bool:
-    # Paginated read — `gh pr view --json comments` truncates on busy PRs. Match the
-    # marker at the START of a comment body (we post it as the first line), so a comment
-    # that merely *quotes* the marker can't suppress the next review.
-    marker = MARKER.format(sha=sha)
+def _has_marker_comment(n: int, marker: str) -> bool:
+    """True if any comment on PR n STARTS with `marker`.
+
+    Paginated — `gh pr view --json comments` truncates on busy PRs. Matched at the start
+    of the body (every marker is posted as the first line), so a comment that merely
+    *quotes* a marker can't suppress the thing the marker guards."""
     jq = f".[] | select(.body | startswith({json.dumps(marker)}))"
     out = _gh(["api", f"repos/{REPO}/issues/{n}/comments", "--paginate",
                "--jq", jq], timeout_s=120)
     return out.strip() != ""
+
+
+def already_reviewed(n: int, sha: str) -> bool:
+    return _has_marker_comment(n, MARKER.format(sha=sha))
+
+
+# A marker's sha is a git object id; anything else out of the comment stream is somebody
+# else's HTML comment that happens to share our prefix, and is ignored.
+_SHA_RE = re.compile(r"[0-9a-f]{7,40}")
+
+
+# The first TWO lines of each comment, tab-separated: the marker, then the header line.
+# Both are needed, because the marker alone does NOT identify our own reviews. Observed on
+# this repo: `claude[bot]` (the parked claude-code-review workflow, prompted to imitate
+# this reviewer) posts comments carrying a byte-identical `<!-- second-opinion sha=… -->`
+# marker — and on PRs #42 and #46 it stamped a DIFFERENT commit than the action did. A
+# foreign marker naming a mid-PR commit is the one shape that could shrink the measured
+# delta below the truly-unreviewed one, so ownership is checked, not assumed.
+#
+# Deliberately not a jq `select(startswith(…))` like the dedup probe: which comments count
+# as a baseline is the load-bearing rule of the whole gate, and a rule living in a jq
+# string inside an argv list is a rule no unit test can reach. @tsv escapes any embedded
+# tab, so the split below is unambiguous.
+_FIRST_LINES_JQ = ('.[] | select(.body != null) | .body | split("\n") '
+                   '| [.[0], (.[1] // "")] | @tsv')
+
+# The invariant part of HEADER's second line, derived rather than duplicated. A release
+# that changes the header stops recognising OLDER comments, which fails the safe way: no
+# baseline means review, and the next posted review re-seeds it.
+HEADER_SIGNATURE = HEADER.split("\n")[1].split("{pass_label}")[0].strip()
+
+
+def parse_marker_shas(stream: str) -> list[str]:
+    """Head SHAs of OUR OWN reviews in a `<marker>\\t<header>`-per-comment stream, oldest
+    first.
+
+    Two independent filters, for two different impostors:
+
+    - the marker prefix rejects SKIP_MARKER and FAIL_MARKER (distinct prefixes), which is
+      what makes trivial deltas accumulate instead of each skipped push becoming its own
+      baseline;
+    - the header line rejects another bot posting this project's marker (see
+      `_FIRST_LINES_JQ`), which is what stops a foreign SHA becoming the baseline."""
+    prefix, suffix = MARKER.split("{sha}")
+    out: list[str] = []
+    for line in stream.splitlines():
+        # .strip('"') so a gh build that quotes raw string output degrades to working
+        # rather than to a permanently empty baseline — which would disable the gate
+        # quietly (always-review, the safe direction, but invisible).
+        marker, _, header = line.strip().strip('"').partition("\t")
+        if not marker.startswith(prefix) or not header.lstrip().startswith(HEADER_SIGNATURE):
+            continue
+        sha = marker[len(prefix):].split(suffix)[0].strip()
+        if _SHA_RE.fullmatch(sha):
+            out.append(sha)
+    return out
+
+
+def last_reviewed_sha(n: int) -> str:
+    """Head SHA of the newest review this bot POSTED on PR n, or "" if it never has.
+
+    The baseline for the trivial-delta gate. Deliberately read from the marker rather than
+    from a state file — the marker comment is already this project's whole persistence
+    layer. Comments (and `--paginate`'s pages) come oldest-first, so the newest marker is
+    the last one parsed."""
+    out = _gh(["api", f"repos/{REPO}/issues/{n}/comments", "--paginate",
+               "--jq", _FIRST_LINES_JQ], timeout_s=120)
+    shas = parse_marker_shas(out)
+    return shas[-1] if shas else ""
+
+
+def trivial_delta(n: int, sha: str, labels=None) -> tuple:
+    """Decide whether this head can skip its review. Returns (Verdict, baseline sha).
+
+    Never raises. Every failure — an unreachable API, an unparseable payload, a bug in
+    here — resolves to "review", because the cost of being wrong is asymmetric: a needless
+    review costs one model call, a wrongly skipped one lets a code change through
+    unreviewed. The rules themselves are in `delta.py`; this is the I/O around them."""
+    try:
+        names = {e.get("name", "") for e in (labels or []) if isinstance(e, dict)}
+        if FORCE_REVIEW_LABEL in names:
+            return (delta.Verdict(False, "force-review-label",
+                                  f"the `{FORCE_REVIEW_LABEL}` label is set on this PR"),
+                    "")
+        base = last_reviewed_sha(n)
+        if not base:
+            return (delta.Verdict(False, "no-prior-review",
+                                  "this reviewer has posted no review on this PR yet"), "")
+        payload = json.loads(_gh(["api", f"repos/{REPO}/compare/{base}...{sha}"],
+                                 timeout_s=120))
+        return delta.classify_compare(payload, _trivial_globs()), base
+    except Exception as e:  # noqa: BLE001 — a gate that fails must fail toward reviewing
+        detail = " ".join(str(e).split())[:150]
+        log(f"#{n}: trivial-delta gate errored ({detail}) — reviewing")
+        _annotate("warning", f"#{n}: trivial-delta gate errored — {detail} — reviewing anyway")
+        return delta.Verdict(False, "gate-error", detail), ""
+
+
+def _skip_notice_text(head: str, base: str, detail: str) -> str:
+    """Markdown for the comment posted instead of a review. Carries SKIP_MARKER, never
+    MARKER: this must not read as a review to the dedup, to the gate's own baseline
+    lookup, or to a human scrolling the thread."""
+    text = SKIP_MARKER.format(sha=head) + "\n\n"
+    text += "### 🤖 Second opinion — skipped (nothing reviewable changed)\n\n"
+    text += (f"No review ran for `{head[:10]}`: the delta since the last head this reviewer "
+             f"actually reviewed (`{base[:10]}`) is {detail}, so a fresh pass could only "
+             f"re-report what the previous one already covered. "
+             f"This comment carries a **different marker** from a review, "
+             f"so the baseline stays at `{base[:10]}`: trivial deltas accumulate, and the "
+             f"first push whose cumulative delta touches code buys a full review of all of "
+             f"it. To force one now, add the `{FORCE_REVIEW_LABEL}` label.\n")
+    text += ("\n*Not a clean bill of health — it says nothing about the code, only that "
+             "none of it changed.*\n")
+    try:
+        server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+        rid = os.environ.get("GITHUB_RUN_ID", "")
+        if REPO and rid:
+            text += f"\n<sub>[Gate decision in the run log]({server}/{REPO}/actions/runs/{rid})</sub>\n"
+    except Exception:  # noqa: BLE001 — a missing run id must not cost the comment
+        pass
+    return text
+
+
+def _post_skip_notice(pr: int, head: str, base: str, detail: str, dry_run: bool) -> bool:
+    """Post the skip audit comment. Returns True only if this call actually posted one.
+
+    Deduped on the head sha the same way the failure notice is, because the daemon
+    re-evaluates every open PR on every sweep: without it a doc-only head would collect
+    one skip comment per tick forever. The return value is what keeps the metrics event
+    honest too — one event per skip, not one per sweep."""
+    text = _skip_notice_text(head, base, detail)
+    if dry_run:
+        print("\n" + "=" * 72 + f"\nDRY RUN — would post skip notice to #{pr}:\n"
+              + "=" * 72 + f"\n{text}\n")
+        return False
+    try:
+        if _has_marker_comment(pr, SKIP_MARKER.format(sha=head)):
+            log(f"#{pr}: skip notice for {head[:10]} already posted — skipping duplicate")
+            return False
+    except Exception as e:  # noqa: BLE001 — a failed dedup read must not suppress the notice
+        log(f"#{pr}: could not check for an existing skip notice "
+            f"({' '.join(str(e).split())[:120]}) — attempting to post")
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write(text)
+        tmp = f.name
+    try:
+        _gh(["pr", "comment", str(pr), "--body-file", tmp])
+        log(f"#{pr}: posted trivial-delta skip notice")
+        return True
+    except Exception as e:  # noqa: BLE001
+        # A skip nobody can see is exactly the silent-clean this project refuses to ship.
+        # The review is already forgone by the time we get here, so say so loudly.
+        log(f"#{pr}: failed to post the skip notice — {' '.join(str(e).split())[:120]}")
+        _annotate("warning", f"#{pr}: review skipped (trivial delta) but the audit "
+                             f"comment could not be posted — the skip is unrecorded on the PR")
+        return False
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 class PassResult(NamedTuple):
@@ -1199,10 +1395,7 @@ def _failure_notice_text(sha: str, checkout: bool = False) -> str:
 
 def _already_noticed_failure(n: int, sha: str) -> bool:
     """True if a failure notice already exists for this exact SHA (dedups daemon sweeps)."""
-    marker = FAIL_MARKER.format(sha=sha)
-    jq = f".[] | select(.body | startswith({json.dumps(marker)}))"
-    out = _gh(["api", f"repos/{REPO}/issues/{n}/comments", "--paginate", "--jq", jq], timeout_s=120)
-    return out.strip() != ""
+    return _has_marker_comment(n, FAIL_MARKER.format(sha=sha))
 
 
 def _post_failure_notice(pr: int, sha: str, dry_run: bool, checkout: bool = False) -> None:
@@ -1625,6 +1818,7 @@ def sweep(args: argparse.Namespace) -> bool:
     reviewed = 0
     skipped_already_reviewed = 0
     skipped_draft = 0
+    skipped_trivial_delta = 0
     for t in targets:
         n, sha, title = t["number"], t["headRefOid"], t["title"]
         if t.get("isDraft") and not args.force:
@@ -1635,6 +1829,35 @@ def sweep(args: argparse.Namespace) -> bool:
             log(f"#{n}: head {sha[:10]} already reviewed — skipping")
             skipped_already_reviewed += 1
             continue
+        if SKIP_TRIVIAL_DELTAS and not args.force:
+            # After already_reviewed, before any model call: the point of the gate is to
+            # decide whether this head is worth the spend, and everything below it costs.
+            # --force means "review this now", so it bypasses the gate exactly as it
+            # bypasses the marker.
+            gate_t0 = time.monotonic()
+            verdict, base = trivial_delta(n, sha, t.get("labels"))
+            log(f"#{n}: trivial-delta gate — "
+                f"{'SKIP' if verdict.trivial else 'review'} ({verdict.reason}: {verdict.detail})")
+            if verdict.trivial:
+                skipped_trivial_delta += 1
+                # The annotation is the checks-UI half of "a skip is never silent"; the
+                # comment is the PR half. A notice, not a warning: nothing malfunctioned.
+                _annotate("notice", f"#{n}: review skipped — the delta since the last "
+                                    f"reviewed head {base[:10]} is {verdict.detail}")
+                posted_notice = _post_skip_notice(n, sha, base, verdict.detail, args.dry_run)
+                # Emitted only when the notice was newly posted, which is once per skipped
+                # head: the daemon re-evaluates this PR every sweep, and an event per tick
+                # would turn one skip into a rising count of them.
+                if posted_notice and not args.dry_run:
+                    metrics.emit_event("review", {"repo": REPO, "outcome": "skipped"}, {
+                        "pr": n, "sha": sha, "model": model, "provider": PROVIDER,
+                        "reason": "trivial_delta", "gate_reason": verdict.reason,
+                        "baseline_sha": base,
+                        # The gate's own time, not the sweep's: this PR never entered
+                        # review_pr, so a sweep-relative duration would grow with the
+                        # position of the PR in the list and mean nothing.
+                        "duration_s": round(time.monotonic() - gate_t0, 1)})
+                continue
         pr_t0 = time.monotonic()
         try:
             outcome = review_pr(n, title, sha, model, merge_model, args.dry_run)
@@ -1660,12 +1883,16 @@ def sweep(args: argparse.Namespace) -> bool:
         # (candidates - reviewed - skipped_*) equals this sweep's NON-POSTED review
         # events (skipped/degraded/error), which do emit per-PR — the reconciliation
         # needs both streams, not these counters alone.
+        # `skipped_trivial_delta` is the one skip that ALSO emits a per-PR event, but only
+        # on the sweep that posts its notice; on later sweeps the same head is counted
+        # here and emits nothing, exactly like an already-reviewed one.
         metrics.emit_event(
             "sweep",
             {"repo": REPO, "outcome": "silent_failure" if silent_failure else "ok"},
             {"candidates": len(targets), "reviewed": reviewed,
              "skipped_already_reviewed": skipped_already_reviewed,
              "skipped_draft": skipped_draft,
+             "skipped_trivial_delta": skipped_trivial_delta,
              "duration_s": round(time.monotonic() - t0, 1),
              # Always present, even at 0: an alert on config_degraded > 0 should not have
              # to distinguish "no problems" from "field absent", and Loki's `| json`

@@ -33,6 +33,12 @@ services:
       EXCLUDE_GLOBS: ${EXCLUDE_GLOBS:-}
       TOOLS: ${TOOLS:-read,bash}
       PI_REASONING: ${PI_REASONING:-true}
+      # Optional: skip the review when everything pushed since the last REVIEWED head is
+      # docs/comment-only (a skip comment is posted instead — never silence). Worth more
+      # to the daemon than to the Action, since every sweep re-considers the same heads.
+      # Empty/false = disabled, and then not one extra API call is made. See README.
+      SKIP_TRIVIAL_DELTAS: ${SKIP_TRIVIAL_DELTAS:-}
+      TRIVIAL_GLOBS: ${TRIVIAL_GLOBS:-}
       # Optional monitoring: push one JSON event per review/sweep to a Loki endpoint
       # (Grafana Cloud or self-hosted). Empty = disabled, keeping PROVIDER=local
       # fully offline. See README "Monitoring".

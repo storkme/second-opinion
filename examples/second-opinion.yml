@@ -40,6 +40,15 @@ jobs:
           # timeout only raises the bill. Off by default; set it once you know your
           # repo's normal range, and an over-ceiling pass reports as `runaway`.
           # max-pass-tokens: "5000000"
+          # Optional: don't pay for a review the push cannot change. When every file
+          # changed since the last head this action REVIEWED is docs (trivial-globs,
+          # default **/*.md) or a comment-only edit, it posts a skip comment instead of
+          # spending a review. Skips carry their own marker, so trivial deltas accumulate
+          # and the next push that touches code reviews all of them; anything ambiguous
+          # (force-push, rename, unknown file type, API error) reviews. Escape hatch: the
+          # `force-review` label. Off by default.
+          # skip-trivial-deltas: "true"
+          # trivial-globs: "**/*.md,docs/**"
           # Optional runtime monitoring: one JSON event per review pushed to Loki
           # (Grafana Cloud or self-hosted). The reviewer runs unattended, so without
           # this its cost, duration, and degraded-rate are only visible by opening

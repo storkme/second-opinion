@@ -99,6 +99,22 @@ inputs:
       the old always-green behavior."
     required: false
     default: "true"
+  skip-trivial-deltas:
+    description: "Skip the review when every change since the last head this action
+      actually REVIEWED is documentation or comment-only, posting a skip comment (its own
+      marker) instead of spending a review that could only re-find already-reported
+      findings. Skips never advance the baseline, so trivial deltas accumulate and the
+      first push that touches code buys a full review of all of them. Anything ambiguous —
+      no prior review, a force-push, a rename, an unknown file type, a missing patch, an
+      API error — reviews. Escape hatch: the `force-review` label. Default false."
+    required: false
+    default: "false"
+  trivial-globs:
+    description: "Comma-separated globs the trivial-delta gate treats as prose (default
+      `**/*.md`). Same syntax as exclude-globs. Only read when skip-trivial-deltas is on;
+      setting it does NOT enable the gate."
+    required: false
+    default: ""
   loki-url:
     description: "Optional monitoring: a Loki push endpoint (e.g. a Grafana Cloud
       stack's https://logs-prod-XXX.grafana.net/loki/api/v1/push) that receives one
@@ -163,6 +179,8 @@ runs:
     TOOLS: ${{ inputs.tools }}
     PI_REASONING: ${{ inputs.reasoning }}
     FAIL_ON_DEGRADED: ${{ inputs.fail-on-degraded }}
+    SKIP_TRIVIAL_DELTAS: ${{ inputs.skip-trivial-deltas }}
+    TRIVIAL_GLOBS: ${{ inputs.trivial-globs }}
     LOKI_URL: ${{ inputs.loki-url }}
     LOKI_USER: ${{ inputs.loki-user }}
     LOKI_TOKEN: ${{ inputs.loki-token }}

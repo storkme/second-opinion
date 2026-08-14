@@ -140,7 +140,10 @@ def _glob_to_re(pat: str) -> re.Pattern:
     return rx
 
 
-def _excluded(path: str, globs: list[str]) -> bool:
+def matches_glob(path: str, globs: list[str]) -> bool:
+    """True when `path` matches any glob in `globs`. Public because two callers now need
+    the same matcher over the same syntax: the diff filter's EXCLUDE_GLOBS and the
+    trivial-delta gate's TRIVIAL_GLOBS (`delta.py`)."""
     return any(_glob_to_re(g).match(path) for g in globs)
 
 
@@ -201,7 +204,7 @@ def filter_diff(diff: str, exclude_globs: list[str], max_chars: int) -> Filtered
     capping = False
     for chunk in _split_by_file(diff):
         path = _file_of_chunk(chunk)
-        if _excluded(path, exclude_globs):
+        if matches_glob(path, exclude_globs):
             continue
         kept.append(chunk)
         if capping:

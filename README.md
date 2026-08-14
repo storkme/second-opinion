@@ -70,6 +70,8 @@ See [`examples/second-opinion.yml`](examples/second-opinion.yml) for the fuller 
 | `tools` | `read,bash` | agent tool grant; set `read` to drop shell (see Security) |
 | `reasoning` | `true` | set `false` for a non-reasoning `model` |
 | `fail-on-degraded` | `true` | fail the check when a pass degrades and posts no review ([below](#degraded-passes-fail-the-check)) |
+| `skip-trivial-deltas` | `false` | skip the review when everything pushed since the last **reviewed** head is docs/comment-only, posting a skip comment instead ([below](#skipping-trivial-deltas-optional)) |
+| `trivial-globs` | `**/*.md` | comma-separated globs the gate treats as prose. Only read when `skip-trivial-deltas` is on. |
 | `loki-url` | — (off) | optional [monitoring](#monitoring-optional): Loki push endpoint receiving JSON events per review/pass/sweep |
 | `loki-user` | — | basic-auth user for `loki-url` (Grafana Cloud: the numeric Loki instance id) |
 | `loki-token` | — | basic-auth password for `loki-url` — scope it to `logs:write` only (see Security) |
@@ -184,6 +186,62 @@ old always-green behavior, set `fail-on-degraded: "false"` (or `FAIL_ON_DEGRADED
 CLI/daemon). In `--watch` mode a degraded pass annotates but never kills the daemon. `--dry-run`
 follows the same contract: a preview whose passes all degrade also exits `2` (nothing was
 posted) — set `FAIL_ON_DEGRADED=false` if a wrapper script needs a guaranteed-`0` preview.
+
+## Skipping trivial deltas (optional)
+
+Off by default. With `skip-trivial-deltas: "true"` (`SKIP_TRIVIAL_DELTAS=true`), a push
+whose entire delta **since the last head this reviewer actually reviewed** is documentation
+or comment-only does not buy a new review — the action posts a short skip comment and exits
+`0` instead.
+
+The reason is that a review reads the *whole* PR diff every time, so a doc-only push can
+only produce the same findings again. A repo whose conventions generate such pushes —
+decision-log commits, comment sweeps, changelog edits — pays a full review per push for
+nothing (in the consumer this was built for, 4 of one PR's 10 review rounds were that loop).
+
+```yaml
+      - uses: storkme/second-opinion@v1
+        with:
+          openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+          skip-trivial-deltas: "true"
+          trivial-globs: "**/*.md,docs/**"      # optional; replaces the default
+```
+
+What makes it safe to skip:
+
+- **A skip never advances the baseline.** The comment carries its own marker
+  (`<!-- second-opinion-skip sha=… -->`), distinct from a review's. The next push is
+  compared against the last **reviewed** head, so trivial deltas *accumulate* — the first
+  push whose cumulative delta touches code buys a full review of all of it, not just of
+  that push.
+- **A skip is never silent.** It posts the comment (naming the baseline SHA and the escape
+  hatch) and emits a `::notice` annotation. If a head has no comment at all, that is the
+  pre-existing malfunction class, not a skip.
+- **Every ambiguity reviews.** No prior review on the PR, a force-push or rebase (compare
+  status is not `ahead`), a rename, a file type the gate can't read comments in, a missing
+  patch, a file list at the API's 300-entry maximum, any API error, any bug in the gate
+  itself — all resolve to *review*. The asymmetry is deliberate: a needless review costs one
+  model call, a wrong skip lets code through unreviewed.
+- **Escape hatch:** put the **`force-review`** label on the PR and the gate stops applying
+  to it. `--force` on the CLI does the same for one run.
+
+What counts as trivial: files matching `trivial-globs` (default `**/*.md`), plus *in-place
+modifications* of a `//`-comment language (`.rs .go .java .kt .kts .scala .swift .dart .zig
+.c .h .cc .cpp .cxx .hh .hpp .cs .js .jsx .mjs .cjs .ts .tsx .proto`) where **every** added
+and removed line is blank or starts with `//`. A trailing-comment edit on a code line counts
+as code. New and deleted files count as code. **Directives count as code** even though they
+look like comments — `//go:build`, `// +build`, `/// <reference …>`, `// @ts-expect-error`,
+`//# sourceMappingURL=`, `//nolint:…`, `// eslint-disable-next-line` and friends are read by
+a compiler, a bundler or a linter, so editing one changes behaviour. Prose keeps its space,
+so `// NOTE: …`, `// SAFETY: …`, `/// doc` and `//! module docs` stay comments.
+`#`-comment languages are deliberately absent:
+a line starting with `#` inside a Python docstring or a shell heredoc is idiomatic, so the
+test would be wrong too often — the table is one line per language in `delta.py` if your repo
+wants to take that trade.
+
+Two accepted blind spots, both bounded by accumulation (the next code push reviews them
+anyway): a changed line that begins with `//` *inside* a string literal reads as a comment,
+and Rust `///` doc comments are treated as prose even though their examples run as doctests.
 
 ## Providers & cost
 

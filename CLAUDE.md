@@ -47,6 +47,15 @@ being *decorrelated* from them: a genuinely independent second pair of eyes, not
   as the first line of the posted comment. No database, no state files. Safe on ephemeral
   CI runners; a force-push (new head SHA) earns a fresh review. The dedup check is a
   **paginated** REST read matching the marker at the **start** of a comment body.
+  The other two markers are deliberately DISTINCT prefixes, never variants of this one:
+  `second-opinion-failed` (a malfunction notice) and `second-opinion-skip` (a trivial-delta
+  skip). The skip one is load-bearing — `last_reviewed_sha` only ever reads the review
+  marker, so a skipped push does not become the next baseline and trivial deltas
+  accumulate until one buys a review of all of them.
+  **The marker is not exclusive in practice**: `claude[bot]` posts comments carrying it
+  too, sometimes naming a different commit (#49). So `parse_marker_shas` requires the
+  marker *and* `HEADER_SIGNATURE` — the header line we actually post. `already_reviewed`
+  still matches the marker alone, which is the suppression bug #49 tracks, not a design.
 - **Decorrelated & read-only.** The agent is *instructed* (not sandboxed) to read/grep the
   checked-out repo freely but never to read other reviewers' comments, fetch PR discussion,
   or edit/commit/push. This is a review-quality property, not a security boundary.
@@ -67,7 +76,13 @@ being *decorrelated* from them: a genuinely independent second pair of eyes, not
 second_opinion/
   __init__.py
   review.py        # SYSTEM_TEMPLATE, AGENTIC_CLAUSE, system_prompt(), filter_diff(),
-                   # shuffle_inputs(), DEFAULT_EXCLUDE_GLOBS — the project-agnostic core.
+                   # shuffle_inputs(), matches_glob(), DEFAULT_EXCLUDE_GLOBS — the
+                   # project-agnostic core.
+  delta.py         # OPTIONAL trivial-delta gate (SKIP_TRIVIAL_DELTAS): pure rules over a
+                   # GitHub compare payload deciding whether a push since the last REVIEWED
+                   # head is docs/comment-only and can skip its review. No I/O — the marker
+                   # read, the compare call and the skip comment live in run.py — so every
+                   # rule is unit-testable. Fails toward reviewing on ANY ambiguity.
   providers.py     # write_models_json(): registers the OpenRouter OR local-llama provider
                    # into ~/.pi/agent/models.json (merge-preserving). Local model id is
                    # discovered from LLAMA_SERVER_URL/v1/models. (was pi_models.py)
@@ -104,6 +119,8 @@ deploy/
   docker-compose.yml   # delivery 2: clones/mounts target repo, runs `... --watch`.
 tests/
   test_review.py   # diff filtering / prompt construction.
+  test_delta.py    # trivial-delta rules: what skips, and (the half that matters) the
+                   # ambiguities that must not.
   test_run.py      # merge-response parsing + marker dedup query (subprocess/requests stubbed).
   test_metrics.py  # Loki emitter: disabled = no network, label discipline, never-raise.
   test_bootstrap.py # guidance mining: corpus build, decorrelation filter, brace-safe synth.
@@ -145,6 +162,8 @@ agentic path never used.
 | `PI_REASONING` | `true` | honored for **both** providers; set `false` for a non-reasoning model |
 | `PI_MAX_TOKENS` | `65536` openrouter / `32768` local | max completion tokens for a review pass (blank/empty → provider-aware default). OpenRouter defaults to the model cap — deepseek-v4-flash-0731 caps at 65536; the old 32768 could burn a reasoning model's whole budget in the reasoning channel and return an empty 200 (spaghettio #574, #565/#566). Local llama keeps 32768. Override via `max-tokens` action input / env. |
 | `FAIL_ON_DEGRADED` | `true` | exit `2` when a degraded pass (timeout / non-zero pi exit / empty output / failed head-checkout) posts no review; `false` restores always-green |
+| `SKIP_TRIVIAL_DELTAS` | `false` | skip the review when the whole delta since the last **reviewed** head is docs/comment-only, posting a `second-opinion-skip` comment instead (`delta.py`). Off = not one extra API call. Everything ambiguous (no prior review, force-push, rename, unknown file type, missing patch, 300-file list, any error) reviews; the `force-review` label and `--force` disable it. |
+| `TRIVIAL_GLOBS` | `**/*.md` | comma-separated globs the gate treats as prose (replaces the default, doesn't extend it) |
 | `LOKI_URL` | — (off) | optional monitoring: Loki push endpoint receiving JSON events per review / per pass / per sweep (`metrics.py`). Unset = no metrics, no network call — `PROVIDER=local` stays fully offline. Fail-soft: a failed push never degrades a review. |
 | `LOKI_USER` / `LOKI_TOKEN` | — | basic auth for `LOKI_URL` (Grafana Cloud: instance id / a `logs:write`-scoped token). The token is stripped from the pi subprocess env and scrubbed from persisted transcripts, like the other secrets. |
 | `OTLP_ENDPOINT` | — (off) | optional tracing: OTLP/HTTP endpoint receiving one trace per review — `review` › `pass` › `llm turn`/`tool` › `merge` (`tracing.py`). Answers "where did the time go", which the Loki events cannot: a measured review was **generation-bound at ~48 tok/s**, with tool calls totalling 0.06s of 194s. Unset = no tracing, no network call. When set, the review's trace id also rides every Loki event as `trace_id` and is printed to the run log, which is how a dashboard row (or a red check) reaches its waterfall. |

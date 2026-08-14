@@ -5,6 +5,52 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Added
+- **`skip-trivial-deltas` (default off): stop paying for a review a push cannot change.**
+  A review reads the *whole* PR diff every time, so a push that only edits prose or
+  comments can only re-report the previous review's findings. With the input on, the
+  action compares the head against the last head it **actually reviewed** and, when every
+  changed file is documentation (`trivial-globs`, default `**/*.md`) or an in-place
+  comment-only edit in a `//`-comment language, posts a skip comment and exits `0` instead
+  of spending a model call. In the consumer this was built for, 4 of one PR's 10 review
+  rounds were that loop.
+  - **A skip never advances the baseline.** Its comment carries a distinct marker
+    (`<!-- second-opinion-skip sha=… -->`), so trivial deltas *accumulate* and the first
+    push that touches code buys a review of all of them — a code change cannot ride in
+    behind a chain of individually-trivial pushes.
+  - **The baseline must be one of *our* reviews.** A comment is only a baseline if it
+    carries the review marker *and* the header this action posts. `claude[bot]` was found
+    posting comments with a byte-identical `<!-- second-opinion sha=… -->` marker naming a
+    different commit (PRs #42, #46), and a foreign marker naming a mid-PR commit is the one
+    shape that could measure a delta smaller than the truly-unreviewed one. (The same
+    collision can suppress a whole review through `already_reviewed`; that is pre-existing
+    and untouched here — see #49.)
+  - **A skip is never silent**: a PR comment naming the baseline SHA and the escape hatch,
+    a `::notice` annotation, and one `outcome=skipped, reason=trivial_delta` metrics event
+    (emitted only when the comment is newly posted, so a `--watch` daemon re-sweeping the
+    same head neither re-comments nor re-counts it).
+  - **Every ambiguity reviews**: no prior review on the PR, a force-push or rebase
+    (compare status ≠ `ahead`), a rename, a file type whose comment syntax the gate does
+    not know, a missing patch, a file list at the compare API's 300-entry maximum, an API
+    error, or an unexpected exception anywhere in the gate. The asymmetry is the whole
+    design — a needless review costs one model call, a wrong skip ships code unreviewed.
+  - **Directives are code**, though they look like comments: `//go:build`, `// +build`,
+    `/// <reference …>`, `// @ts-expect-error`, `//# sourceMappingURL=`, `//nolint:…`,
+    `// eslint-disable-next-line`. A compiler, bundler or linter reads them, so editing one
+    changes behaviour — and `.go`/`.ts`/`.js` are in the table. Prose keeps its space, so
+    `// NOTE:`, `// SAFETY:`, `/// doc` and `//! module docs` stay comments.
+  - **Escape hatch**: the `force-review` label on the PR (or `--force` on the CLI).
+  - Two accepted blind spots, documented rather than hidden, both bounded by that
+    accumulation: a changed line starting with `//` *inside* a string literal reads as a
+    comment, and Rust `///` doc comments are treated as prose although their examples run
+    as doctests. `#`-comment languages are deliberately not in the table — a leading `#`
+    inside a docstring or a heredoc is idiomatic, which would make the test wrong far too
+    often.
+  - With the input off (the default) nothing changes: no marker read, no compare call, no
+    behavioural difference at all.
+
 ## [1.8.2] - 2026-08-09
 
 ### Added
