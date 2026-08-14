@@ -3,6 +3,7 @@ and the marker dedup query. Subprocess/requests are stubbed — no network. Run 
 `pytest` (or directly: `python -m tests.test_run`).
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -2340,3 +2341,229 @@ def test_sweep_event_always_carries_config_degraded_even_when_zero():
         run._CONFIG_DEGRADED[:] = saved
         real_emit()
         run._annotate = _REAL_ANNOTATE
+
+
+# ---------------------------------------------- trivial-delta gate (SKIP_TRIVIAL_DELTAS)
+
+_BASE_SHA = "1" * 40   # the head a review was actually posted for
+_HEAD_SHA = "2" * 40   # the head being pushed now
+_SKIPPED_SHA = "3" * 40
+
+
+def _comment_lines(*bodies):
+    """The gate reads one line per comment — each comment's FIRST line, where markers live."""
+    return "".join(b + "\n" for b in bodies)
+
+
+class _GateGh:
+    """A `_gh` stand-in covering the three calls the gate makes: the marker read, the
+    compare, and the skip comment. Anything else raises rather than returning a plausible
+    empty string — a gate silently reading "" from a call nobody modelled would vote
+    "review" and look perfectly healthy while testing nothing."""
+
+    def __init__(self, comments="", compare=None, skip_notice_posted=False):
+        self.comments = comments
+        self.compare = compare
+        self.skip_notice_posted = skip_notice_posted
+        self.calls = []
+        self.posted = []
+        self.compare_ranges = []
+
+    def __call__(self, args, timeout_s=60):
+        self.calls.append(list(args))
+        if args[0] == "api" and args[1].endswith("/comments"):
+            jq = args[args.index("--jq") + 1]
+            if "startswith" in jq:      # a per-sha marker dedup probe
+                hit = self.skip_notice_posted and "second-opinion-skip" in jq
+                return "a comment\n" if hit else ""
+            return self.comments
+        if args[0] == "api" and "/compare/" in args[1]:
+            self.compare_ranges.append(args[1].split("/compare/", 1)[1])
+            if isinstance(self.compare, Exception):
+                raise self.compare
+            return json.dumps(self.compare)
+        if args[:2] == ["pr", "comment"]:
+            with open(args[args.index("--body-file") + 1], encoding="utf-8") as fh:
+                self.posted.append(fh.read())
+            return ""
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    def api_paths(self):
+        return [a[1] for a in self.calls if a and a[0] == "api"]
+
+
+def _md_only_compare():
+    return {"status": "ahead",
+            "files": [{"filename": "docs/notes.md", "status": "modified",
+                       "patch": "@@ -1 +1 @@\n-a\n+b"}]}
+
+
+def _code_compare():
+    return {"status": "ahead",
+            "files": [{"filename": "src/lib.rs", "status": "modified",
+                       "patch": "@@ -1 +1 @@\n-let a = 1;\n+let a = 2;"}]}
+
+
+def _drive_gate_sweep(compare=None, comments=None, labels=None, enabled=True,
+                      force=False, dry_run=False, skip_notice_posted=False):
+    """One sweep over one PR against a fake GitHub, with the gate configurable."""
+    import argparse
+    import contextlib
+    import io
+    if comments is None:
+        comments = _comment_lines(run.MARKER.format(sha=_BASE_SHA))
+    real = (run.SKIP_TRIVIAL_DELTAS, run._gh, run.resolve_model, run.write_models_json,
+            run.pr_meta, run.already_reviewed, run.review_pr)
+    gh = _GateGh(comments, compare, skip_notice_posted)
+    run.SKIP_TRIVIAL_DELTAS = enabled
+    run._gh = gh
+    run.resolve_model = lambda: "m"
+    run.write_models_json = lambda model: None
+    run.pr_meta = lambda n: {"number": n, "headRefOid": _HEAD_SHA, "title": "t",
+                             "isDraft": False, "labels": labels or []}
+    run.already_reviewed = lambda n, sha: False
+    reviewed = []
+    run.review_pr = lambda *a, **k: (reviewed.append(a), run.ReviewOutcome(True, False))[1]
+    events, real_emit = _capture_metrics()
+    annotations = _capture_annotations()
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            run.sweep(argparse.Namespace(pr=7, dry_run=dry_run, force=force,
+                                         watch=False, interval=1))
+        return types.SimpleNamespace(gh=gh, reviewed=reviewed, events=events,
+                                     annotations=list(annotations), stdout=out.getvalue(),
+                                     posted=gh.posted)
+    finally:
+        (run.SKIP_TRIVIAL_DELTAS, run._gh, run.resolve_model, run.write_models_json,
+         run.pr_meta, run.already_reviewed, run.review_pr) = real
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_the_gate_is_off_by_default_and_costs_nothing_when_off():
+    # The compatibility promise: with SKIP_TRIVIAL_DELTAS unset there is no marker read,
+    # no compare, no new decision — every push reviews exactly as it did before.
+    assert run.SKIP_TRIVIAL_DELTAS is False, "default must stay off"
+    r = _drive_gate_sweep(compare=_md_only_compare(), enabled=False)
+    assert len(r.reviewed) == 1
+    assert r.gh.api_paths() == [] and r.gh.posted == []
+
+
+def test_a_docs_only_push_skips_the_review_and_says_so_on_the_pr():
+    r = _drive_gate_sweep(compare=_md_only_compare())
+    assert r.reviewed == [], "a trivial delta must not reach review_pr"
+    assert r.gh.compare_ranges == [f"{_BASE_SHA}...{_HEAD_SHA}"]
+    assert len(r.posted) == 1
+    body = r.posted[0]
+    # The marker is distinct AND first — the dedup and the baseline lookup both key on
+    # the start of the body.
+    assert body.startswith(run.SKIP_MARKER.format(sha=_HEAD_SHA)), body[:120]
+    assert not body.startswith(run.MARKER.format(sha=_HEAD_SHA))
+    assert _BASE_SHA[:10] in body and "force-review" in body
+    assert "not a clean bill of health" in body.lower()
+    # ...and it is announced in the checks UI too, as a notice: nothing malfunctioned.
+    assert any(lvl == "notice" and "skipped" in msg for lvl, msg in r.annotations), r.annotations
+
+
+def test_the_baseline_is_the_last_review_never_the_last_skip():
+    # The property that makes accumulation work: three doc pushes in a row all measure
+    # against the last REVIEWED head, so the first push that touches code is compared
+    # against everything since that review — not just against the previous doc push.
+    comments = _comment_lines(
+        run.MARKER.format(sha=_BASE_SHA),
+        run.SKIP_MARKER.format(sha=_SKIPPED_SHA),
+        run.FAIL_MARKER.format(sha=_SKIPPED_SHA),
+        run.SKIP_MARKER.format(sha="4" * 40))
+    r = _drive_gate_sweep(compare=_md_only_compare(), comments=comments)
+    assert r.gh.compare_ranges == [f"{_BASE_SHA}...{_HEAD_SHA}"], r.gh.compare_ranges
+
+
+def test_a_code_push_still_gets_its_review():
+    r = _drive_gate_sweep(compare=_code_compare())
+    assert len(r.reviewed) == 1 and r.posted == []
+
+
+def test_the_force_review_label_disables_the_gate_before_any_lookup():
+    r = _drive_gate_sweep(compare=_md_only_compare(),
+                          labels=[{"name": "docs"}, {"name": "force-review"}])
+    assert len(r.reviewed) == 1
+    assert r.gh.api_paths() == [], "the label short-circuits before the marker read"
+
+
+def test_a_pr_with_no_prior_review_is_never_skipped():
+    r = _drive_gate_sweep(compare=_md_only_compare(), comments="")
+    assert len(r.reviewed) == 1
+    assert r.gh.compare_ranges == [], "nothing to compare against — review, don't compare"
+
+
+def test_the_force_flag_bypasses_the_gate_like_it_bypasses_the_marker():
+    r = _drive_gate_sweep(compare=_md_only_compare(), force=True)
+    assert len(r.reviewed) == 1 and r.gh.api_paths() == []
+
+
+def test_a_broken_gate_reviews_and_says_it_broke():
+    r = _drive_gate_sweep(compare=RuntimeError("compare API exploded"))
+    assert len(r.reviewed) == 1, "a gate that cannot decide must fail toward reviewing"
+    assert any(lvl == "warning" and "gate errored" in msg for lvl, msg in r.annotations), \
+        r.annotations
+
+
+def test_a_skip_emits_one_review_event_and_one_sweep_counter():
+    r = _drive_gate_sweep(compare=_md_only_compare())
+    reviews = [e for e in r.events if e[0] == "review"]
+    assert len(reviews) == 1
+    _ev, labels, fields = reviews[0]
+    assert labels["outcome"] == "skipped"
+    assert fields["reason"] == "trivial_delta"
+    assert fields["gate_reason"] == "docs-or-comment-only"
+    assert fields["baseline_sha"] == _BASE_SHA and fields["sha"] == _HEAD_SHA
+    sweeps = [e for e in r.events if e[0] == "sweep"]
+    assert sweeps[-1][2]["skipped_trivial_delta"] == 1
+    assert sweeps[-1][2]["reviewed"] == 0 and sweeps[-1][2]["candidates"] == 1
+
+
+def test_a_daemon_resweeping_the_same_head_does_not_repost_or_recount_the_event():
+    # --watch re-evaluates every open PR on every tick. Without the dedup, one skipped
+    # push would grow one comment (and one event) per interval, forever.
+    r = _drive_gate_sweep(compare=_md_only_compare(), skip_notice_posted=True)
+    assert r.posted == [], "the skip notice for this head already exists"
+    assert [e for e in r.events if e[0] == "review"] == []
+    # Still counted as a skip for the sweep's reconciliation, like an already-reviewed head.
+    assert [e for e in r.events if e[0] == "sweep"][-1][2]["skipped_trivial_delta"] == 1
+
+
+def test_dry_run_prints_the_skip_and_posts_nothing():
+    r = _drive_gate_sweep(compare=_md_only_compare(), dry_run=True)
+    assert r.posted == [] and r.reviewed == []
+    assert "would post skip notice" in r.stdout
+    assert r.events == [], "dry run emits no metrics events"
+
+
+def test_parse_marker_shas_takes_the_newest_review_and_ignores_the_other_markers():
+    stream = _comment_lines(
+        "just a human comment",
+        run.MARKER.format(sha=_BASE_SHA),
+        run.SKIP_MARKER.format(sha=_SKIPPED_SHA),
+        run.FAIL_MARKER.format(sha=_SKIPPED_SHA),
+        f"> quoting {run.MARKER.format(sha='9' * 40)} in a reply",
+        run.MARKER.format(sha="a" * 40),
+        run.SKIP_MARKER.format(sha="b" * 40))
+    assert run.parse_marker_shas(stream) == [_BASE_SHA, "a" * 40]
+    assert run.parse_marker_shas("") == []
+    # A non-sha payload is somebody else's HTML comment, not a baseline.
+    assert run.parse_marker_shas("<!-- second-opinion sha=not-a-sha -->\n") == []
+    # A gh build that quotes raw string output must not silently empty the baseline.
+    assert run.parse_marker_shas(f'"{run.MARKER.format(sha=_BASE_SHA)}"\n') == [_BASE_SHA]
+
+
+def test_last_reviewed_sha_reads_first_lines_and_returns_the_newest():
+    gh = _GateGh(_comment_lines(run.MARKER.format(sha=_BASE_SHA),
+                                run.MARKER.format(sha=_HEAD_SHA)))
+    real = run._gh
+    run._gh = gh
+    try:
+        assert run.last_reviewed_sha(7) == _HEAD_SHA
+        assert "--paginate" in gh.calls[0], "a busy PR's comments span pages"
+    finally:
+        run._gh = real

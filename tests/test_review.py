@@ -96,11 +96,11 @@ def test_filter_diff_untruncated_full_text_equals_excerpt():
 
 
 def test_glob_semantics():
-    assert rv._excluded("a/b/c.png", ["**/*.png"])
-    assert rv._excluded("x.png", ["**/*.png"])          # leading **/ matches root
-    assert rv._excluded("build/out/x.js", ["**/build/**"])
-    assert not rv._excluded("src/a/b.js", ["src/*.js"])  # * does not cross /
-    assert rv._excluded("src/b.js", ["src/*.js"])
+    assert rv.matches_glob("a/b/c.png", ["**/*.png"])
+    assert rv.matches_glob("x.png", ["**/*.png"])          # leading **/ matches root
+    assert rv.matches_glob("build/out/x.js", ["**/build/**"])
+    assert not rv.matches_glob("src/a/b.js", ["src/*.js"])  # * does not cross /
+    assert rv.matches_glob("src/b.js", ["src/*.js"])
 
 
 def test_system_prompt_injects_project_clause_and_guidance():
