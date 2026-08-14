@@ -181,6 +181,44 @@ def test_a_block_comment_opener_counts_as_code():
     assert not delta.is_comment_only_patch("@@ -1 +1 @@\n+ * continued\n", "//")
 
 
+def test_a_directive_is_code_even_though_it_looks_like_a_comment():
+    # Read by a compiler, a bundler or a linter — editing one changes what the code does.
+    # .go/.ts/.js are in the default table, so this is reachable, and the accumulation
+    # property does not help if a directive-only edit is the last push before a merge.
+    directives = [
+        ("main.go", "-//go:build linux\n+//go:build linux && amd64"),
+        ("main.go", "-// +build linux\n+// +build linux,amd64"),
+        ("main.go", "-//go:generate stringer -type=X\n+//go:generate stringer -type=Y"),
+        ("main.go", "-//nolint:gosec\n+//nolint:gosec,errcheck"),
+        ("app.ts", '-/// <reference types="node" />\n+/// <reference types="bun" />'),
+        ("app.ts", "-// @ts-expect-error legacy\n+// @ts-nocheck"),
+        ("app.js", "-// eslint-disable-next-line no-console\n+// eslint-disable"),
+        ("app.js", "-//# sourceMappingURL=a.map\n+//# sourceMappingURL=b.map"),
+        ("app.js", "-// prettier-ignore\n+// prettier-ignore-start"),
+        ("Foo.java", "-// @formatter:off\n+// @formatter:on"),
+    ]
+    for path, body in directives:
+        v = delta.classify_compare(_cmp([_f(path, patch="@@ -1 +1 @@\n" + body)]))
+        assert not v.trivial, (path, body, v)
+
+
+def test_ordinary_prose_comments_are_still_prose():
+    # The other half of the same rule: the primary consumer's comments are full of
+    # `// NOTE:` and `// SAFETY:`, and a directive test that swallowed those would leave
+    # the feature switched on and doing nothing.
+    prose = [
+        "-// NOTE: the old reason\n+// NOTE: the new reason",
+        "-// SAFETY: caller holds the lock\n+// SAFETY: caller holds the lock, see #12",
+        "-/// Doc comment prose.\n+/// Doc comment prose, rewritten.",
+        "-//! Module docs.\n+//! Module docs, expanded.",
+        "-// TODO: fix later\n+// TODO: fixed",
+        "-//tightly written note\n+//tightly written note, edited",
+    ]
+    for body in prose:
+        v = delta.classify_compare(_cmp([_f("src/lib.rs", patch="@@ -1 +1 @@\n" + body)]))
+        assert v.trivial, (body, v)
+
+
 def test_extension_matching_is_case_insensitive_and_ignores_dotfiles():
     assert delta._ext("src/Foo.RS") == ".rs"
     assert delta._ext(".gitignore") == ""

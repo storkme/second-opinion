@@ -36,6 +36,11 @@ All notable changes to this project are documented here. The format follows
     not know, a missing patch, a file list at the compare API's 300-entry maximum, an API
     error, or an unexpected exception anywhere in the gate. The asymmetry is the whole
     design — a needless review costs one model call, a wrong skip ships code unreviewed.
+  - **Directives are code**, though they look like comments: `//go:build`, `// +build`,
+    `/// <reference …>`, `// @ts-expect-error`, `//# sourceMappingURL=`, `//nolint:…`,
+    `// eslint-disable-next-line`. A compiler, bundler or linter reads them, so editing one
+    changes behaviour — and `.go`/`.ts`/`.js` are in the table. Prose keeps its space, so
+    `// NOTE:`, `// SAFETY:`, `/// doc` and `//! module docs` stay comments.
   - **Escape hatch**: the `force-review` label on the PR (or `--force` on the CLI).
   - Two accepted blind spots, documented rather than hidden, both bounded by that
     accumulation: a changed line starting with `//` *inside* a string literal reads as a

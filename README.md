@@ -229,7 +229,12 @@ What counts as trivial: files matching `trivial-globs` (default `**/*.md`), plus
 modifications* of a `//`-comment language (`.rs .go .java .kt .kts .scala .swift .dart .zig
 .c .h .cc .cpp .cxx .hh .hpp .cs .js .jsx .mjs .cjs .ts .tsx .proto`) where **every** added
 and removed line is blank or starts with `//`. A trailing-comment edit on a code line counts
-as code. New and deleted files count as code. `#`-comment languages are deliberately absent:
+as code. New and deleted files count as code. **Directives count as code** even though they
+look like comments — `//go:build`, `// +build`, `/// <reference …>`, `// @ts-expect-error`,
+`//# sourceMappingURL=`, `//nolint:…`, `// eslint-disable-next-line` and friends are read by
+a compiler, a bundler or a linter, so editing one changes behaviour. Prose keeps its space,
+so `// NOTE: …`, `// SAFETY: …`, `/// doc` and `//! module docs` stay comments.
+`#`-comment languages are deliberately absent:
 a line starting with `#` inside a Python docstring or a shell heredoc is idiomatic, so the
 test would be wrong too often — the table is one line per language in `delta.py` if your repo
 wants to take that trade.

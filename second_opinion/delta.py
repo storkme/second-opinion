@@ -82,6 +82,47 @@ def _ext(path: str) -> str:
     return base[dot:].lower() if dot > 0 else ""
 
 
+# A line comment is prose — unless it is a DIRECTIVE. `//go:build`, `// +build`,
+# `/// <reference …>`, `// @ts-expect-error`, `//# sourceMappingURL=`, `//nolint:all` and
+# `// eslint-disable-next-line` are read by a compiler, a bundler or a linter: editing one
+# changes what the code DOES while looking exactly like editing prose. `.go`, `.ts` and
+# `.js` are in the default table, so this is reachable rather than theoretical — and the
+# accumulation property does not rescue it if a directive-only edit is the LAST push
+# before a merge. (Raised by the review bot on PR #47.)
+#
+# Matched by shape first and by name only where shape cannot: a directive either carries
+# punctuation prose does not use in that position (`@ < # +`), or attaches its argument to
+# the token with no space (`//go:build`, `//nolint:all`), or is one of a short list of
+# tool names. Prose keeps the space — `// NOTE: …`, `// SAFETY: …` and `/// doc line` stay
+# comments, which matters because that is what the primary consumer's comments look like.
+#
+# Note for anyone adding a `#`-comment language to the table: `# type: ignore`,
+# `# noqa`, `# pylint: disable` and `#!/usr/bin/env` are the same class and these rules do
+# NOT all carry over — the space-attached test in particular does not fire on them.
+_DIRECTIVE_WORDS = ("eslint", "tslint", "stylelint", "jshint", "jslint",
+                    "prettier-ignore", "biome-ignore", "istanbul", "c8", "v8",
+                    "deno-lint-ignore", "nolint", "noinspection", "clang-format",
+                    "swiftlint", "sourcemappingurl")
+
+
+def _is_directive(body: str, prefix: str) -> bool:
+    """True when a whole-line comment is machine-readable rather than prose."""
+    rest = body[len(prefix):].lstrip("/!")   # /// and //! are doc forms, still prose
+    attached = bool(rest) and not rest[:1].isspace()
+    text = rest.lstrip()
+    if not text:
+        return False
+    if text[0] in "@<#+":
+        return True
+    word = text.split()[0].lower()
+    # `//go:build`, `//nolint:all` — no space, and a colon inside the first word. The
+    # no-space half is what keeps `// NOTE: …` prose; `//TODO: …` reads as a directive and
+    # buys a review it does not need, which is the harmless direction.
+    if attached and ":" in word:
+        return True
+    return word.startswith(_DIRECTIVE_WORDS)
+
+
 def is_comment_only_patch(patch: str, prefix: str) -> bool:
     """True when every ADDED or REMOVED line in a unified-diff patch is blank or an
     entire-line comment.
@@ -95,12 +136,16 @@ def is_comment_only_patch(patch: str, prefix: str) -> bool:
 
     A trailing comment on a code line (`foo(); // now n+1`) counts as CODE — the line does
     not *start* with the token, so its file leaves the trivial set. Ditto a line that
-    opens a block comment (`/* …`), which is conservative and stays that way."""
+    opens a block comment (`/* …`), which is conservative and stays that way, and a
+    whole-line *directive* (`//go:build`, `// eslint-disable-next-line`), which is a
+    comment to the eye and an instruction to a toolchain — see `_is_directive`."""
     for line in patch.splitlines():
         if not line or line[0] not in "+-":
             continue  # hunk headers, context lines, "\ No newline at end of file"
         body = line[1:].strip()
-        if not body or body.startswith(prefix):
+        if not body:
+            continue
+        if body.startswith(prefix) and not _is_directive(body, prefix):
             continue
         return False
     return True
