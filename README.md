@@ -71,7 +71,7 @@ See [`examples/second-opinion.yml`](examples/second-opinion.yml) for the fuller 
 | `reasoning` | `true` | set `false` for a non-reasoning `model` |
 | `fail-on-degraded` | `true` | fail the check when a pass degrades and posts no review ([below](#degraded-passes-fail-the-check)) |
 | `skip-trivial-deltas` | `false` | skip the review when everything pushed since the last **reviewed** head is docs/comment-only, posting a skip comment instead ([below](#skipping-trivial-deltas-optional)) |
-| `trivial-globs` | `**/*.md` | comma-separated globs that gate treats as prose. Only read when `skip-trivial-deltas` is on. |
+| `trivial-globs` | `**/*.md` | comma-separated globs the gate treats as prose. Only read when `skip-trivial-deltas` is on. |
 | `loki-url` | — (off) | optional [monitoring](#monitoring-optional): Loki push endpoint receiving JSON events per review/pass/sweep |
 | `loki-user` | — | basic-auth user for `loki-url` (Grafana Cloud: the numeric Loki instance id) |
 | `loki-token` | — | basic-auth password for `loki-url` — scope it to `logs:write` only (see Security) |
