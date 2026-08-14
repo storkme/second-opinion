@@ -213,6 +213,12 @@ def test_ordinary_prose_comments_are_still_prose():
         "-//! Module docs.\n+//! Module docs, expanded.",
         "-// TODO: fix later\n+// TODO: fixed",
         "-//tightly written note\n+//tightly written note, edited",
+        # Markdown headings inside Rust doc comments — prose, and everywhere. Only the
+        # ATTACHED `//#` form (sourceMappingURL) is a directive.
+        "-/// # Examples\n+/// # Examples, expanded",
+        "-//! # Overview\n+//! # Overview, rewritten",
+        "-//////////////////\n+////////////////////",
+        "-// ----- section -----\n+// ----- section, renamed -----",
     ]
     for body in prose:
         v = delta.classify_compare(_cmp([_f("src/lib.rs", patch="@@ -1 +1 @@\n" + body)]))

@@ -112,7 +112,12 @@ def _is_directive(body: str, prefix: str) -> bool:
     text = rest.lstrip()
     if not text:
         return False
-    if text[0] in "@<#+":
+    if text[0] in "@<+":
+        return True
+    if text[0] == "#" and attached:
+        # `//#sourceMappingURL=…` is a directive; `/// # Examples` is a markdown heading in
+        # a Rust doc comment, which is prose and very common in the repos this targets.
+        # Only the attached form is the directive.
         return True
     word = text.split()[0].lower()
     # `//go:build`, `//nolint:all` — no space, and a colon inside the first word. The
