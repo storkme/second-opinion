@@ -362,31 +362,48 @@ def already_reviewed(n: int, sha: str) -> bool:
 _SHA_RE = re.compile(r"[0-9a-f]{7,40}")
 
 
-# One line per comment: its FIRST line, which is where every marker this project posts
-# lives. Deliberately not a jq `select(startswith(…))` like the dedup probe: which markers
-# count as a baseline is the load-bearing rule of the whole gate (a skip marker must NOT),
-# and a rule expressed in a jq string inside an argv list is a rule no unit test can
-# reach. Filtering here keeps `parse_marker_shas` directly testable.
-_FIRST_LINES_JQ = '.[] | select(.body != null) | .body | split("\n")[0]'
+# The first TWO lines of each comment, tab-separated: the marker, then the header line.
+# Both are needed, because the marker alone does NOT identify our own reviews. Observed on
+# this repo: `claude[bot]` (the parked claude-code-review workflow, prompted to imitate
+# this reviewer) posts comments carrying a byte-identical `<!-- second-opinion sha=… -->`
+# marker — and on PRs #42 and #46 it stamped a DIFFERENT commit than the action did. A
+# foreign marker naming a mid-PR commit is the one shape that could shrink the measured
+# delta below the truly-unreviewed one, so ownership is checked, not assumed.
+#
+# Deliberately not a jq `select(startswith(…))` like the dedup probe: which comments count
+# as a baseline is the load-bearing rule of the whole gate, and a rule living in a jq
+# string inside an argv list is a rule no unit test can reach. @tsv escapes any embedded
+# tab, so the split below is unambiguous.
+_FIRST_LINES_JQ = ('.[] | select(.body != null) | .body | split("\n") '
+                   '| [.[0], (.[1] // "")] | @tsv')
+
+# The invariant part of HEADER's second line, derived rather than duplicated. A release
+# that changes the header stops recognising OLDER comments, which fails the safe way: no
+# baseline means review, and the next posted review re-seeds it.
+HEADER_SIGNATURE = HEADER.split("\n")[1].split("{pass_label}")[0].strip()
 
 
-def parse_marker_shas(first_lines: str) -> list[str]:
-    """Review-marker SHAs found in a first-line-per-comment stream, oldest first.
+def parse_marker_shas(stream: str) -> list[str]:
+    """Head SHAs of OUR OWN reviews in a `<marker>\\t<header>`-per-comment stream, oldest
+    first.
 
-    SKIP_MARKER and FAIL_MARKER are ignored by construction — their prefixes
-    (`<!-- second-opinion-skip `, `<!-- second-opinion-failed `) are not this one, and
-    that is the property that makes trivial deltas accumulate rather than each skipped
-    push becoming its own baseline."""
+    Two independent filters, for two different impostors:
+
+    - the marker prefix rejects SKIP_MARKER and FAIL_MARKER (distinct prefixes), which is
+      what makes trivial deltas accumulate instead of each skipped push becoming its own
+      baseline;
+    - the header line rejects another bot posting this project's marker (see
+      `_FIRST_LINES_JQ`), which is what stops a foreign SHA becoming the baseline."""
     prefix, suffix = MARKER.split("{sha}")
     out: list[str] = []
-    for line in first_lines.splitlines():
+    for line in stream.splitlines():
         # .strip('"') so a gh build that quotes raw string output degrades to working
         # rather than to a permanently empty baseline — which would disable the gate
         # quietly (always-review, the safe direction, but invisible).
-        line = line.strip().strip('"')
-        if not line.startswith(prefix):
+        marker, _, header = line.strip().strip('"').partition("\t")
+        if not marker.startswith(prefix) or not header.lstrip().startswith(HEADER_SIGNATURE):
             continue
-        sha = line[len(prefix):].split(suffix)[0].strip()
+        sha = marker[len(prefix):].split(suffix)[0].strip()
         if _SHA_RE.fullmatch(sha):
             out.append(sha)
     return out

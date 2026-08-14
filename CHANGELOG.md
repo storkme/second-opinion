@@ -20,6 +20,13 @@ All notable changes to this project are documented here. The format follows
     (`<!-- second-opinion-skip sha=… -->`), so trivial deltas *accumulate* and the first
     push that touches code buys a review of all of them — a code change cannot ride in
     behind a chain of individually-trivial pushes.
+  - **The baseline must be one of *our* reviews.** A comment is only a baseline if it
+    carries the review marker *and* the header this action posts. `claude[bot]` was found
+    posting comments with a byte-identical `<!-- second-opinion sha=… -->` marker naming a
+    different commit (PRs #42, #46), and a foreign marker naming a mid-PR commit is the one
+    shape that could measure a delta smaller than the truly-unreviewed one. (The same
+    collision can suppress a whole review through `already_reviewed`; that is pre-existing
+    and untouched here — see #49.)
   - **A skip is never silent**: a PR comment naming the baseline SHA and the escape hatch,
     a `::notice` annotation, and one `outcome=skipped, reason=trivial_delta` metrics event
     (emitted only when the comment is newly posted, so a `--watch` daemon re-sweeping the

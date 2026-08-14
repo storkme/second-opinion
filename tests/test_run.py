@@ -2350,9 +2350,22 @@ _HEAD_SHA = "2" * 40   # the head being pushed now
 _SKIPPED_SHA = "3" * 40
 
 
-def _comment_lines(*bodies):
-    """The gate reads one line per comment — each comment's FIRST line, where markers live."""
-    return "".join(b + "\n" for b in bodies)
+# The header line the baseline lookup uses to tell OUR reviews from another bot posting
+# our marker. Real shapes, copied from this repo's own PR threads.
+_OUR_HEADER = "### 🤖 Second opinion — single pass (`deepseek/deepseek-v4-flash-0731`)"
+_SKIP_HEADER = "### 🤖 Second opinion — skipped (nothing reviewable changed)"
+_CLAUDE_BOT_HEADER = ("**Second opinion** — an independent, decorrelated review. "
+                      "Silence ≠ clean — treat as a tripwire, not a gate.")
+
+
+def _comment_lines(*rows):
+    """The stream the baseline lookup sees: `<first line>\\t<second line>` per comment.
+    A bare string means one of our own reviews; a tuple sets the header line explicitly."""
+    out = []
+    for row in rows:
+        first, header = row if isinstance(row, tuple) else (row, _OUR_HEADER)
+        out.append(f"{first}\t{header}\n")
+    return "".join(out)
 
 
 class _GateGh:
@@ -2472,10 +2485,31 @@ def test_the_baseline_is_the_last_review_never_the_last_skip():
     # against everything since that review — not just against the previous doc push.
     comments = _comment_lines(
         run.MARKER.format(sha=_BASE_SHA),
-        run.SKIP_MARKER.format(sha=_SKIPPED_SHA),
-        run.FAIL_MARKER.format(sha=_SKIPPED_SHA),
-        run.SKIP_MARKER.format(sha="4" * 40))
+        # Real header lines: a skip notice's own header also starts "### 🤖 Second
+        # opinion —", so it is the MARKER that must reject it, not the header check.
+        (run.SKIP_MARKER.format(sha=_SKIPPED_SHA), _SKIP_HEADER),
+        (run.FAIL_MARKER.format(sha=_SKIPPED_SHA), ""),
+        (run.SKIP_MARKER.format(sha="4" * 40), _SKIP_HEADER))
     r = _drive_gate_sweep(compare=_md_only_compare(), comments=comments)
+    assert r.gh.compare_ranges == [f"{_BASE_SHA}...{_HEAD_SHA}"], r.gh.compare_ranges
+
+
+def test_another_bot_posting_our_marker_is_not_a_baseline():
+    # Observed live: claude[bot] posts comments carrying a byte-identical
+    # `<!-- second-opinion sha=… -->` marker, and on PRs #42/#46 it named a DIFFERENT
+    # commit than the action did. Trusting it would measure the delta from a commit this
+    # reviewer never read — the one direction that can hide code.
+    foreign = _comment_lines(
+        (run.MARKER.format(sha=_BASE_SHA), _CLAUDE_BOT_HEADER))
+    r = _drive_gate_sweep(compare=_md_only_compare(), comments=foreign)
+    assert len(r.reviewed) == 1, "a foreign marker must not become the baseline"
+    assert r.gh.compare_ranges == []
+    # ...and our own review posted BEFORE it still wins the baseline, rather than the
+    # foreign one merely being skipped over into an empty result.
+    mixed = _comment_lines(
+        run.MARKER.format(sha=_BASE_SHA),
+        (run.MARKER.format(sha="c" * 40), _CLAUDE_BOT_HEADER))
+    r = _drive_gate_sweep(compare=_md_only_compare(), comments=mixed)
     assert r.gh.compare_ranges == [f"{_BASE_SHA}...{_HEAD_SHA}"], r.gh.compare_ranges
 
 
@@ -2542,22 +2576,33 @@ def test_dry_run_prints_the_skip_and_posts_nothing():
 
 def test_parse_marker_shas_takes_the_newest_review_and_ignores_the_other_markers():
     stream = _comment_lines(
-        "just a human comment",
+        ("just a human comment", "with a second line"),
         run.MARKER.format(sha=_BASE_SHA),
-        run.SKIP_MARKER.format(sha=_SKIPPED_SHA),
-        run.FAIL_MARKER.format(sha=_SKIPPED_SHA),
-        f"> quoting {run.MARKER.format(sha='9' * 40)} in a reply",
+        (run.SKIP_MARKER.format(sha=_SKIPPED_SHA), _SKIP_HEADER),
+        (run.FAIL_MARKER.format(sha=_SKIPPED_SHA), ""),
+        (f"> quoting {run.MARKER.format(sha='9' * 40)} in a reply", _OUR_HEADER),
+        (run.MARKER.format(sha="8" * 40), _CLAUDE_BOT_HEADER),
         run.MARKER.format(sha="a" * 40),
-        run.SKIP_MARKER.format(sha="b" * 40))
+        (run.SKIP_MARKER.format(sha="b" * 40), _SKIP_HEADER))
     assert run.parse_marker_shas(stream) == [_BASE_SHA, "a" * 40]
     assert run.parse_marker_shas("") == []
     # A non-sha payload is somebody else's HTML comment, not a baseline.
-    assert run.parse_marker_shas("<!-- second-opinion sha=not-a-sha -->\n") == []
+    assert run.parse_marker_shas(f"<!-- second-opinion sha=not-a-sha -->\t{_OUR_HEADER}\n") == []
     # A gh build that quotes raw string output must not silently empty the baseline.
-    assert run.parse_marker_shas(f'"{run.MARKER.format(sha=_BASE_SHA)}"\n') == [_BASE_SHA]
+    quoted = f'"{run.MARKER.format(sha=_BASE_SHA)}\t{_OUR_HEADER}"\n'
+    assert run.parse_marker_shas(quoted) == [_BASE_SHA]
 
 
-def test_last_reviewed_sha_reads_first_lines_and_returns_the_newest():
+def test_the_header_signature_is_derived_from_the_header_we_actually_post():
+    # Hardcoding it would let the header and the recogniser drift apart silently, and the
+    # drift only shows up as a gate that quietly never fires again.
+    posted = run.HEADER.format(marker=run.MARKER.format(sha=_BASE_SHA),
+                               pass_label="union ×3", model="m", body="finding")
+    first, second = posted.splitlines()[:2]
+    assert run.parse_marker_shas(f"{first}\t{second}\n") == [_BASE_SHA]
+
+
+def test_last_reviewed_sha_reads_the_comment_stream_and_returns_the_newest():
     gh = _GateGh(_comment_lines(run.MARKER.format(sha=_BASE_SHA),
                                 run.MARKER.format(sha=_HEAD_SHA)))
     real = run._gh

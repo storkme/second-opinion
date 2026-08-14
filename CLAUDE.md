@@ -52,6 +52,10 @@ being *decorrelated* from them: a genuinely independent second pair of eyes, not
   skip). The skip one is load-bearing — `last_reviewed_sha` only ever reads the review
   marker, so a skipped push does not become the next baseline and trivial deltas
   accumulate until one buys a review of all of them.
+  **The marker is not exclusive in practice**: `claude[bot]` posts comments carrying it
+  too, sometimes naming a different commit (#49). So `parse_marker_shas` requires the
+  marker *and* `HEADER_SIGNATURE` — the header line we actually post. `already_reviewed`
+  still matches the marker alone, which is the suppression bug #49 tracks, not a design.
 - **Decorrelated & read-only.** The agent is *instructed* (not sandboxed) to read/grep the
   checked-out repo freely but never to read other reviewers' comments, fetch PR discussion,
   or edit/commit/push. This is a review-quality property, not a security boundary.
