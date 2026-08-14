@@ -455,10 +455,10 @@ def _skip_notice_text(head: str, base: str, detail: str) -> str:
     lookup, or to a human scrolling the thread."""
     text = SKIP_MARKER.format(sha=head) + "\n\n"
     text += "### 🤖 Second opinion — skipped (nothing reviewable changed)\n\n"
-    text += (f"No review ran for `{head[:10]}`: every change since the last head this "
-             f"reviewer actually reviewed (`{base[:10]}`) is documentation or comment-only "
-             f"— {detail} — so a fresh pass could only re-report what the previous one "
-             f"already covered. This comment carries a **different marker** from a review, "
+    text += (f"No review ran for `{head[:10]}`: the delta since the last head this reviewer "
+             f"actually reviewed (`{base[:10]}`) is {detail}, so a fresh pass could only "
+             f"re-report what the previous one already covered. "
+             f"This comment carries a **different marker** from a review, "
              f"so the baseline stays at `{base[:10]}`: trivial deltas accumulate, and the "
              f"first push whose cumulative delta touches code buys a full review of all of "
              f"it. To force one now, add the `{FORCE_REVIEW_LABEL}` label.\n")
@@ -1842,8 +1842,8 @@ def sweep(args: argparse.Namespace) -> bool:
                 skipped_trivial_delta += 1
                 # The annotation is the checks-UI half of "a skip is never silent"; the
                 # comment is the PR half. A notice, not a warning: nothing malfunctioned.
-                _annotate("notice", f"#{n}: review skipped — {verdict.detail} since the "
-                                    f"last reviewed head {base[:10]}")
+                _annotate("notice", f"#{n}: review skipped — the delta since the last "
+                                    f"reviewed head {base[:10]} is {verdict.detail}")
                 posted_notice = _post_skip_notice(n, sha, base, verdict.detail, args.dry_run)
                 # Emitted only when the notice was newly posted, which is once per skipped
                 # head: the daemon re-evaluates this PR every sweep, and an event per tick

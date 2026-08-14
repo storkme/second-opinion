@@ -217,10 +217,12 @@ def classify_compare(payload, trivial_globs: list[str] | None = None,
     if not files:
         # `ahead` with no files: an empty commit, or a commit whose content the compare
         # collapsed. There is nothing a reviewer could read.
-        return Verdict(True, "empty-delta", "no files changed since the reviewed head")
+        return Verdict(True, "empty-delta", "empty — no files changed at all")
     for entry in files:
         why = classify_file(entry, globs, table)
         if why:
             return Verdict(False, "code-in-delta", why)
+    # Phrased as a noun clause, not a sentence: it is quoted mid-sentence in the skip
+    # comment a human reads ("the delta … is <detail>"), and also stands alone in the log.
     return Verdict(True, "docs-or-comment-only",
-                   f"all {len(files)} changed file(s) are documentation or comment-only")
+                   f"{len(files)} changed file(s), all documentation or comment-only")
