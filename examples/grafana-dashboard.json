@@ -332,7 +332,7 @@
         "type": "loki",
         "uid": "${datasource}"
       },
-      "description": "Mean USD per review event, degraded runs included (they cost real money and excluding them flatters the average). Rises when diffs get bigger or K goes up — not when the model repriced. Filtered to provider=openrouter: a local review contributes real tokens and $0, which would drag this line down and read as a price drop that never happened. On `provider` rather than the mix row's `split_provider` because split_provider did not exist before v1.9.0, and filtering on it would discard every review logged before then — the history this panel exists to show. Known gap: a cross-combo run (PROVIDER=local with MERGE_PROVIDER=openrouter) has real billed merge spend but provider=local, so it is excluded here and its cost goes unshown. Accepted to keep the pre-1.9.0 history; nobody running a single provider is affected. Also excludes cross-combo runs (split_provider=mixed), whose pooled tokens include a free local merge — the mirror of the local-review case, and unreachable by a provider filter. The denominator drops error/skipped reviews, which report no tokens or cost and so would count in it while contributing nothing to the numerator.",
+      "description": "Mean USD per review event, degraded runs included (they cost real money and excluding them flatters the average). Rises when diffs get bigger or K goes up — not when the model repriced. Filtered to provider=openrouter: a local review contributes real tokens and $0, which would drag this line down and read as a price drop that never happened. On `provider` rather than the mix row's `split_provider` because split_provider did not exist before v1.9.0, and filtering on it would discard every review logged before then — the history this panel exists to show. Known gap: a cross-combo run (PROVIDER=local with MERGE_PROVIDER=openrouter) has real billed merge spend but provider=local, so it is excluded here and its cost goes unshown. Accepted to keep the pre-1.9.0 history; nobody running a single provider is affected. Also excludes cross-combo runs (split_provider=mixed), whose pooled tokens include a free local merge — the mirror of the local-review case, and unreachable by a provider filter. Both sides require the field this panel divides by, so a review that reported no spend at all — errored, skipped, or failed at checkout — cannot count in the denominator while contributing nothing to the numerator. Keyed on the field rather than on a list of outcomes, which would need extending every time a new no-spend route is added.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -365,7 +365,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", outcome!~\"error|skipped\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" | split_provider!=\"mixed\" | unwrap cost_usd | __error__=\"\" [$__auto])) / sum(count_over_time({service=\"second-opinion\", event=\"review\", outcome!~\"error|skipped\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" | split_provider!=\"mixed\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" | split_provider!=\"mixed\" | cost_usd != \"\" | unwrap cost_usd | __error__=\"\" [$__auto])) / sum(count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" | split_provider!=\"mixed\" | cost_usd != \"\" [$__auto]))",
           "legendFormat": "__auto",
           "queryType": "range",
           "refId": "A"
@@ -380,7 +380,7 @@
         "type": "loki",
         "uid": "${datasource}"
       },
-      "description": "Mean tokens per review — the volume half of cost per review. cost/review = tokens/review x rate, so any two of these three panels explain the third. Filtered to provider=openrouter on both sides, like the two panels it decomposes with — if this one counted free local reviews and they did not, the stated identity would quietly stop holding. Also excludes cross-combo runs (split_provider=mixed), whose pooled tokens include a free local merge — the mirror of the local-review case, and unreachable by a provider filter. The denominator drops error/skipped reviews, which report no tokens or cost and so would count in it while contributing nothing to the numerator.",
+      "description": "Mean tokens per review — the volume half of cost per review. cost/review = tokens/review x rate, so any two of these three panels explain the third. Filtered to provider=openrouter on both sides, like the two panels it decomposes with — if this one counted free local reviews and they did not, the stated identity would quietly stop holding. Also excludes cross-combo runs (split_provider=mixed), whose pooled tokens include a free local merge — the mirror of the local-review case, and unreachable by a provider filter. Both sides require the field this panel divides by, so a review that reported no spend at all — errored, skipped, or failed at checkout — cannot count in the denominator while contributing nothing to the numerator. Keyed on the field rather than on a list of outcomes, which would need extending every time a new no-spend route is added.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -413,7 +413,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", outcome!~\"error|skipped\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" | split_provider!=\"mixed\" | unwrap tokens | __error__=\"\" [$__auto])) / sum(count_over_time({service=\"second-opinion\", event=\"review\", outcome!~\"error|skipped\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" | split_provider!=\"mixed\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" | split_provider!=\"mixed\" | tokens != \"\" | unwrap tokens | __error__=\"\" [$__auto])) / sum(count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" | split_provider!=\"mixed\" | tokens != \"\" [$__auto]))",
           "legendFormat": "__auto",
           "queryType": "range",
           "refId": "A"

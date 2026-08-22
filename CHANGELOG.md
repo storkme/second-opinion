@@ -26,10 +26,13 @@ All notable changes to this project are documented here. The format follows
   `split_provider`, compares as empty, and passes. A `PROVIDER=local` run with an
   openrouter merge still has its real merge spend excluded — accepted, and noted in each
   panel's description.
-- **Cost/tokens per review no longer count reviews that reported neither.** `error` and
-  `skipped` reviews carry no `tokens` or `cost_usd`, so they fell out of the numerator's
-  unwrap while still adding `+1` to the `count_over_time` denominator. Degraded reviews
-  stay counted: they have both, and they are real money.
+- **Cost/tokens per review no longer count reviews that reported neither.** A review that
+  spent nothing — errored, skipped, or failed at checkout — emits no `tokens` or
+  `cost_usd`, so it fell out of the numerator's unwrap while still adding `+1` to the
+  `count_over_time` denominator. Both sides now require the field the panel divides by,
+  keyed on that field rather than on a list of outcomes, which would need extending every
+  time a new no-spend route is added. Degraded reviews that *did* spend still count: they
+  carry both figures, and they are real money.
 - **A cached count is no longer discarded when `prompt_tokens` is missing.** The clamp
   added above enforces "cached cannot exceed the prompt it is part of"; with no prompt
   reported there is no such bound, and zeroing the provider's own figure loses information
