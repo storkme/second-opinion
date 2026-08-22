@@ -380,7 +380,7 @@
         "type": "loki",
         "uid": "${datasource}"
       },
-      "description": "Mean tokens per review — the volume half of cost per review. cost/review = tokens/review x rate, so any two of these three panels explain the third.",
+      "description": "Mean tokens per review — the volume half of cost per review. cost/review = tokens/review x rate, so any two of these three panels explain the third. Filtered to provider=openrouter on both sides, like the two panels it decomposes with — if this one counted free local reviews and they did not, the stated identity would quietly stop holding.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -413,7 +413,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__auto])) / sum(count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"}[$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" | unwrap tokens | __error__=\"\" [$__auto])) / sum(count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" [$__auto]))",
           "legendFormat": "__auto",
           "queryType": "range",
           "refId": "A"
