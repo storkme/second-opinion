@@ -259,16 +259,24 @@ fifth class by subtracting the other four is not — that number came from arith
 from the provider. The merge call is the one case made deliberately disjoint, by
 subtracting `prompt_tokens_details.cached_tokens` out of `prompt_tokens` in `_chat`.
 
-**`tokens` does include cache reads**, which is what makes `tokens_cache_read / tokens` a
-share rather than a nonsense ratio. Worth stating because the unit test that pins pi's
-authoritative total cannot show it — its `totalTokens: 110` is equally `input(100) +
-output(10)` or `fresh(50) + cached(50) + output(10)`, and a reviewer of the PR that added
-this read it the second way. The billing settles it: thirty days of real reviews cost
-**$0.0369 per Mtok** of `tokens`, and the cheapest class here is fresh input at
-$0.08/Mtok. Nothing counting only fresh input and output can bill at half the floor price
-of its cheapest member — only cache reads at $0.016/Mtok get you there. If a provider ever
-reports a cache-exclusive total, the hit-rate panel climbing past 100% is the symptom, and
-it is deliberately not clamped so that stays visible.
+**What pi actually sends, measured:** every real pi usage record carrying a `cacheRead`
+satisfies `totalTokens == input + output + cacheRead + cacheWrite` exactly. The four are
+**disjoint**, and `input` is fresh input alone. Two things follow, and the mix panels need
+both: cache reads are *inside* `tokens` (so `tokens_cache_read / tokens` is a genuine
+share), and they are *not* inside `input` (so the stacked mix panel has no overlap).
+The billing agrees independently — thirty days of reviews cost **$0.0369 per Mtok** of
+`tokens`, under the $0.08/Mtok floor for fresh input, which only cache reads at
+$0.016/Mtok can explain.
+
+Say it out loud because the unit test pinning pi's authoritative total is a *synthetic*
+folding provider, written to prove `totalTokens` beats the component sum — not a sample of
+what pi sends. Read as canonical it implies cache reads are outside `tokens`, or that they
+are inside `input`; two separate reviews of the PR that added this took one horn each, and
+both were wrong. So the four do sum to `tokens` today, but nothing enforces it: a genuinely
+folding provider would break the identity, and its numbers pass through unaltered rather
+than being "corrected" into figures it never sent. If a provider ever reports a
+cache-exclusive total, the hit-rate panel climbing past 100% is the symptom — deliberately
+not clamped, so it stays visible.
 
 `local` (llama-server) is the exception: it reports no cached count at all, so a local
 merge's prompt is all filed as fresh input. Read the mix panels as hosted-only — a local

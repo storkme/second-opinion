@@ -1634,8 +1634,16 @@ def test_read_session_usage_prefers_authoritative_total_tokens():
     d = tempfile.mkdtemp(prefix="so-sess-total-test-")
     try:
         with open(os.path.join(d, "pass.jsonl"), "w") as f:
-            # Some providers include cached tokens in input already. Summing components would
-            # report 160, but pi's authoritative total for the message is 110.
+            # A SYNTHETIC folding provider — one that includes cached tokens in its input
+            # count already. Summing components would report 160, but the authoritative
+            # total for the message is 110, and this pins that the total wins.
+            #
+            # NOT a sample of what pi sends. Real pi usage records are disjoint
+            # (totalTokens == input + output + cacheRead + cacheWrite; verified across
+            # every local session record carrying a cacheRead), and the sibling test
+            # below pins that shape. Reading this fixture as canonical is what led two
+            # separate reviews of the token-split PR to opposite wrong conclusions —
+            # that cache reads sit outside `tokens`, and that they sit inside `input`.
             f.write('{"message":{"usage":{"input":100,"output":10,"cacheRead":50,'
                     '"cacheWrite":0,"totalTokens":110,"cost":{"total":0.03}}}}\n')
         usage = run._read_session_usage(d)
@@ -1666,6 +1674,40 @@ def test_finish_pass_carries_the_token_breakdown():
         # pins why), so the components are the provider's component counts and nothing
         # more — a panel that derives one by subtracting the others is inventing data.
         assert result.tokens == 110
+        # The DISJOINT shape pi actually sends, from the same fixture read a second way:
+        # every real local session record satisfies total == input+output+cacheRead+
+        # cacheWrite, so cache reads are inside `tokens` without being inside `input`.
+        # Both halves matter — the first makes tokens_cache_read/tokens a share, the
+        # second makes the stacked mix panel free of overlap.
+        assert 165 == (result.tokens_input + result.tokens_output
+                       + result.tokens_cache_read + result.tokens_cache_write)
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_finish_pass_leaves_a_folding_providers_numbers_alone():
+    # The deliberate non-normalisation. This provider folds its 50 cached tokens into
+    # input, so the components overshoot the authoritative total (160 vs 110) — and the
+    # split is still emitted exactly as reported, not "corrected" by subtracting cacheRead
+    # from input the way _chat does for the OpenAI-shaped merge usage.
+    #
+    # That asymmetry is the point: _chat KNOWS its shape folds, because the chat API
+    # documents prompt_tokens as cache-inclusive. Here the shape varies by provider and
+    # nothing in the record says which one this is, so inventing a fresh-input figure
+    # would put a number in the metrics that no provider ever sent. A stat that does not
+    # add up is diagnosable; a fabricated one is not.
+    d = tempfile.mkdtemp(prefix="so-sess-folding-test-")
+    try:
+        with open(os.path.join(d, "pass.jsonl"), "w") as f:
+            f.write('{"message":{"usage":{"input":100,"output":10,"cacheRead":50,'
+                    '"cacheWrite":0,"totalTokens":110,"cost":{"total":0.03}}}}\n')
+        result = run._finish_pass("m", d, False, "review", "ok")
+        assert result.tokens_input == 100, "reported as-is, not 100-50"
+        assert result.tokens_cache_read == 50
+        assert result.tokens == 110
+        assert (result.tokens_input + result.tokens_output
+                + result.tokens_cache_read + result.tokens_cache_write) == 160
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)

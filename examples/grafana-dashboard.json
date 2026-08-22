@@ -538,7 +538,7 @@
         "type": "loki",
         "uid": "${datasource}"
       },
-      "description": "The four classes as reported, stacked. Cheapest at the bottom, so a healthy review is mostly the bottom band. Stacked height is NOT `tokens` — these are the provider's component counts and `tokens` is its authoritative total, which for some providers already folds cached tokens into input.",
+      "description": "The four classes as reported, stacked. Cheapest at the bottom, so a healthy review is mostly the bottom band. Bands do not overlap for pi, which reports the four disjointly (verified: totalTokens == input+output+cacheRead+cacheWrite on every real record) — a provider that instead folded cached tokens into its input count would show them in two bands, and the giveaway is the stack standing taller than this review's `tokens`. Stacked height is not `tokens` by construction: these are component counts, that is the provider's authoritative total.",
       "fieldConfig": {
         "defaults": {
           "custom": {
