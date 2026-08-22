@@ -523,7 +523,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_cache_read | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | unwrap tokens_cache_read | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | unwrap tokens | __error__=\"\" [$__auto]))",
           "legendFormat": "__auto",
           "queryType": "range",
           "refId": "A"
@@ -538,16 +538,15 @@
         "type": "loki",
         "uid": "${datasource}"
       },
-      "description": "The four classes as reported, stacked. Cheapest at the bottom, so a healthy review is mostly the bottom band. Bands do not overlap for pi, which reports the four disjointly (verified: totalTokens == input+output+cacheRead+cacheWrite on every real record) — a provider that instead folded cached tokens into its input count would show them in two bands, and the giveaway is the stack standing taller than this review's `tokens`. Stacked height is not `tokens` by construction: these are component counts, that is the provider's authoritative total.",
+      "description": "The four classes as reported, stacked. Cheapest at the bottom, so a healthy review is mostly the bottom band and a widening top band is the expensive one. Bands do not double-count for pi, which reports the four disjointly (verified: totalTokens == input+output+cacheRead+cacheWrite on every real record); a provider that folded cached tokens into its input count would show them in two bands at once. Note the stack totals every review in each bucket, so its height is not any one review's `tokens` — compare against the Tokens-by-repo panel for the same window rather than reading a per-review figure off this one.",
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "showPoints": "always",
-            "pointSize": 5,
-            "spanNulls": true
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
           },
           "unit": "short",
           "decimals": 0
@@ -563,7 +562,7 @@
       "id": 27,
       "options": {
         "legend": {
-          "showLegend": false
+          "showLegend": true
         },
         "tooltip": {
           "mode": "single"
@@ -571,25 +570,25 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_cache_read | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | unwrap tokens_cache_read | __error__=\"\" [$__auto]))",
           "legendFormat": "cache read",
           "queryType": "range",
           "refId": "A"
         },
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_input | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | unwrap tokens_input | __error__=\"\" [$__auto]))",
           "legendFormat": "fresh input",
           "queryType": "range",
           "refId": "B"
         },
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_output | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | unwrap tokens_output | __error__=\"\" [$__auto]))",
           "legendFormat": "output",
           "queryType": "range",
           "refId": "C"
         },
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_cache_write | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | unwrap tokens_cache_write | __error__=\"\" [$__auto]))",
           "legendFormat": "cache write",
           "queryType": "range",
           "refId": "D"
@@ -637,7 +636,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_output | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | unwrap tokens_output | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | unwrap tokens | __error__=\"\" [$__auto]))",
           "legendFormat": "__auto",
           "queryType": "range",
           "refId": "A"

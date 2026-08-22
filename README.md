@@ -303,8 +303,12 @@ present, `0` when healthy): a mistyped `max-pass-tokens` disables that ceiling a
   liveness, and a raw event log. *Cache hit rate* divides by the event's pooled `tokens`
   (the cached share of the billed total), **not** `cache_read / (cache_read + input)` —
   the two answer different questions and only the first is comparable with the cost
-  panels beside it. The token-mix row reads empty for reviews logged before
-  the split shipped — no query is broken, the fields simply were not emitted yet. It also asks for a **Tempo** data
+  panels beside it. Every token-mix query carries a `|= "tokens_cache_read"` line filter so
+  both sides of each ratio see the same population: without it a window spanning the
+  release would keep pre-split events in the denominator while `__error__=""` dropped them
+  from the numerator, diluting the ratio toward zero — which looks exactly like the cache
+  regression the panel exists to catch. With it the row simply reads empty before the
+  split shipped, which is the honest answer. It also asks for a **Tempo** data
   source, used only by the trace links in the two tables; leave it unset if you don't run
   [tracing](#tracing-optional) and every other panel is unaffected.
 - **Contract:** off by default (no `LOKI_URL` = no network call, so `PROVIDER=local`
