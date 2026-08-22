@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
-## [Unreleased]
+## [1.9.0] - 2026-08-22
 
 ### Added
 - **The token split: `tokens_input` / `tokens_output` / `tokens_cache_read` /
@@ -468,7 +468,8 @@ All notable changes to this project are documented here. The format follows
   - Per-project guidance file (the reviewer's "memory"), HTML-marker idempotency (no database),
     and decorrelated, advisory-never-a-gate framing.
 
-[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.8.2...HEAD
+[Unreleased]: https://github.com/storkme/second-opinion/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/storkme/second-opinion/compare/v1.8.2...v1.9.0
 [1.8.2]: https://github.com/storkme/second-opinion/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/storkme/second-opinion/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/storkme/second-opinion/compare/v1.7.0...v1.8.0
