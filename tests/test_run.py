@@ -1537,6 +1537,11 @@ def test_chat_never_reports_negative_input_when_cached_exceeds_prompt():
     meta = {}
     run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
     assert meta["tokens_input"] == 0
+    # And the cached count is clamped to the prompt rather than carried through: left
+    # at 99 the components fallback would report 100 tokens for a call the provider
+    # said cost 11, inventing 89 tokens out of a malformed envelope.
+    assert meta["tokens_cache_read"] == 10
+    assert meta["tokens"] == 11, "prompt_tokens + completion_tokens, not 0 + 1 + 99"
 
 
 def test_chat_keeps_valid_content_when_usage_metadata_is_malformed():

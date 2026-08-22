@@ -41,7 +41,7 @@ def _parse_max_tokens(raw: str, default: int) -> int:
 
 def _reasoning() -> bool:
     # Honored for BOTH providers (carry-forward #3 — the old daemon hardcoded this true).
-    # The default model (GLM 5.2) is a reasoning model; set PI_REASONING=false for a
+    # The default model (DEFAULT_MODEL above) is a reasoning model; set PI_REASONING=false for a
     # non-reasoning model so pi doesn't send reasoning params it can't use.
     return os.environ.get("PI_REASONING", "true").strip().lower() in ("1", "true", "yes", "on")
 

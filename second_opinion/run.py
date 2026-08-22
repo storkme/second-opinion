@@ -923,9 +923,16 @@ def _chat(base_url: str, api_key: str, model: str, prompt: str, meta: dict | Non
         ptd = usage.get("prompt_tokens_details") or {}
         if not isinstance(ptd, dict):
             ptd = {}
-        cached = _int_or_zero(ptd.get("cached_tokens"))
+        # CLAMPED to the prompt, not merely floored at zero after subtracting. An
+        # envelope claiming more cached tokens than prompt tokens is malformed, and
+        # taking its cached count at face value would make the components fallback below
+        # exceed the prompt+completion the provider actually reported — fabricating
+        # tokens out of a bad response, which is the one thing this module refuses to do
+        # anywhere else (see _token_split_fields on not deriving classes by arithmetic).
+        prompt = _int_or_zero(usage.get("prompt_tokens"))
+        cached = min(_int_or_zero(ptd.get("cached_tokens")), prompt)
         meta["tokens_cache_read"] = cached
-        meta["tokens_input"] = max(0, _int_or_zero(usage.get("prompt_tokens")) - cached)
+        meta["tokens_input"] = prompt - cached
         meta["tokens_output"] = _int_or_zero(usage.get("completion_tokens"))
         # The chat API reports no cache-WRITE class. A merge is one stateless call that
         # never reads back what it wrote, so 0 is the honest value, not a missing field.

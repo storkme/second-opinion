@@ -319,7 +319,11 @@ present, `0` when healthy): a mistyped `max-pass-tokens` disables that ceiling a
   unit economics (effective $/Mtok, cost per review, cost per 100k diff chars), token mix
   (cache hit rate, the four classes stacked, output share), review and pass duration
   p50/p95, degraded passes ranked by what they burned, review rounds per PR, daemon
-  liveness, and a raw event log. *Cache hit rate* divides by the event's pooled `tokens`
+  liveness, and a raw event log. The unit-economics panels filter on `provider="openrouter"`
+  and the token-mix panels on `split_provider="openrouter"` — both exclude free local
+  reviews, which would otherwise drag a money panel toward zero, but the rate row uses the
+  older field on purpose so it keeps the history predating 1.9.0.
+  *Cache hit rate* divides by the event's pooled `tokens`
   (the cached share of the billed total), **not** `cache_read / (cache_read + input)` —
   the two answer different questions and only the first is comparable with the cost
   panels beside it. Every token-mix query carries a `|= "tokens_cache_read"` line filter so
