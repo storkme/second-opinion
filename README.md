@@ -279,13 +279,27 @@ cache-exclusive total, the hit-rate panel climbing past 100% is the symptom — 
 not clamped, so it stays visible.
 
 `local` (llama-server) reports no cached count at all — for the merge *and* for the review
-passes. So the mix row filters on `provider="openrouter"` rather than caveating: a local
-review would otherwise contribute a real denominator with a structurally-zero numerator,
-reading as 0% cache, which is exactly the total-cache-failure symptom the panel exists to
-raise. Under a mixed setup (`PROVIDER=local` with `MERGE_PROVIDER=openrouter`) the local
-passes would dilute whatever the hosted merge did. A local review also costs nothing, so
-it has no place in a row about money — and a local-only estate correctly sees this row
-empty rather than wrong.
+passes — so anything it touched has a structurally-zero cache numerator over a real
+denominator, reading as 0% cache: exactly the total-cache-failure symptom the panel exists
+to raise. It also costs nothing, so it has no place in a row about money.
+
+The mix row therefore filters on **`split_provider`**, a field on the review event, and
+not on `provider`. The distinction is load-bearing because `provider` names who ran the
+*passes* while the split also pools the *merge*, and `MERGE_PROVIDER` is set
+independently:
+
+| `PROVIDER` | `MERGE_PROVIDER` | `provider` | `split_provider` |
+|---|---|---|---|
+| openrouter | openrouter | `openrouter` | `openrouter` — charted |
+| local | openrouter | `local` | `local` — excluded |
+| **openrouter** | **local** | **`openrouter`** | **`mixed` — excluded** |
+
+That third row is the one a `provider` filter would have admitted: an openrouter-tagged
+review whose local merge filed its whole prompt as fresh input, pulling the hit rate down
+and reading as a cache regression that never happened. `split_provider` is `"mixed"` only
+when a merge actually **ran** under a different provider — at `K=1` none does, so such a
+run is charted normally however `MERGE_PROVIDER` is set. A local-only estate sees the row
+empty, which is the honest answer.
 
 `outcome="merged_on_retry"` is the merge signal worth alerting on: a merge that fails once
 and recovers annotates nothing in CI (the warning fires only when *both* attempts fail), so

@@ -29,6 +29,14 @@ All notable changes to this project are documented here. The format follows
   provider's authoritative total wherever it gives one, and some providers fold cached
   tokens into their input count, so ratios against `tokens` are sound but deriving a
   fifth class by subtraction is not.
+- **`split_provider` on the `review` event** — which provider's accounting the four token
+  classes came from. `provider` names who ran the *passes*, but the split also pools the
+  *merge*, and `MERGE_PROVIDER` is configured independently; llama-server reports no cached
+  count, so a run it touched has a structurally-zero cache numerator over a real
+  denominator. The mix panels filter on this rather than `provider`, which would have
+  admitted an openrouter-reviewed/local-merged run and charted its missing cache reads as a
+  regression that never happened. `"mixed"` only when a merge actually ran under a
+  different provider — at `K=1` none does.
 - **Dashboard: two rows.** *Unit economics* (effective $/Mtok, cost per review, tokens
   per review, cost per 100k diff chars) separates rate from volume; *Token mix* (cache hit
   rate, the four classes stacked, output share) then attributes a moving rate. Read

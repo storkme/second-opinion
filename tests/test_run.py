@@ -2015,6 +2015,61 @@ def test_review_event_token_split_covers_the_passes_and_the_merge():
         run._annotate = _REAL_ANNOTATE
 
 
+def test_review_event_flags_a_split_blended_across_two_providers():
+    # The leaking cross combo: openrouter passes, local merge. The review event is tagged
+    # provider="openrouter" (who ran the passes) while its split also carries the local
+    # merge's classes — and llama-server reports no cached count, so that merge's whole
+    # prompt lands in fresh input. A mix panel filtering on `provider` alone would admit
+    # this run and read the inflated input and missing cache reads as a cache regression.
+    real = (run.K, run.run_pass, run.PROVIDER, run.MERGE_PROVIDER)
+    run.K, run.PROVIDER, run.MERGE_PROVIDER = 2, "openrouter", "local"
+    real_deps = _stub_review_pr_deps()
+    # A fixed result, not an iterator: openrouter runs passes concurrently.
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult(
+        "finding", "ok", cost=0.01, tokens=1000, tokens_input=100,
+        tokens_output=20, tokens_cache_read=800, tokens_cache_write=80)
+    real_merge = run.merge_reviews
+
+    def fake_merge(pr, title, passes, model, meta=None):
+        if meta is not None:
+            # The local shape: everything filed as fresh input, no cached count at all.
+            meta.update({"cost": 0.0, "tokens": 300, "merged": True, "attempts": 1,
+                         "tokens_input": 300, "tokens_output": 0,
+                         "tokens_cache_read": 0, "tokens_cache_write": 0})
+        return "merged body"
+
+    run.merge_reviews = fake_merge
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(13, "t", "cafebabe00", "m", "m", dry_run=False)
+        review = [f for e, _l, f in events if e == "review"]
+        assert len(review) == 1, events
+        assert review[0]["provider"] == "openrouter", "still tagged by who ran the passes"
+        assert review[0]["split_provider"] == "mixed", \
+            "the split pools two accountings, and the mix panels must be able to skip it"
+        # The local merge's prompt really did land in fresh input — the thing that would
+        # have been misread as a cache regression.
+        assert review[0]["tokens_input"] == 500
+
+        # Same providers => not mixed, so the ordinary hosted run is still charted.
+        run.MERGE_PROVIDER = "openrouter"
+        events.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(14, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert [f for e, _l, f in events
+                if e == "review"][0]["split_provider"] == "openrouter"
+    finally:
+        run.K, run.run_pass, run.PROVIDER, run.MERGE_PROVIDER = real
+        run.merge_reviews = real_merge
+        _restore_review_pr_deps(real_deps)
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
 def test_degraded_review_event_carries_the_split_of_what_it_burned():
     # An all-passes-failed review is where the split matters most: the review event is
     # the only record of the spend, and "2M cache reads" and "2M fresh input" are the

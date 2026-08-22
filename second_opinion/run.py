@@ -942,7 +942,9 @@ def _chat(base_url: str, api_key: str, model: str, prompt: str, meta: dict | Non
         # NOTE llama-server (MERGE_PROVIDER=local) omits prompt_tokens_details entirely,
         # so cached=0 and the whole prompt is reported as fresh input even when it was
         # served from cache. Not worth faking: a local merge costs nothing, so the class
-        # it lands in changes no bill. Read the mix panels as hosted-only.
+        # it lands in changes no bill. It does however make an openrouter-reviewed run's
+        # split a blend of two accountings, which is what _split_provider exists to let
+        # the mix panels exclude.
     return content
 
 
@@ -1298,6 +1300,26 @@ def _trace_fields(trace_id: str) -> dict:
     return {"trace_id": trace_id} if trace_id else {}
 
 
+def _split_provider(merge_ran: bool) -> str:
+    """Whose accounting the review event's four token classes actually came from.
+
+    `provider` on a review event is PROVIDER — who ran the passes — but the split pools
+    the passes AND the merge, and MERGE_PROVIDER is independently configurable. So on a
+    cross combo the classes are a blend of two shapes, and only one of them reports
+    caching: llama-server sends no cached count, so its whole prompt is filed as fresh
+    input. A mix panel filtering on `provider` alone would admit an
+    openrouter-reviewed/local-merged run and read its inflated fresh input and missing
+    cache reads as a cache regression — the exact false signal the row exists to raise.
+
+    Hence a field the panels can filter on that answers the question they actually ask:
+    were ALL of these tokens accounted for the same way? "mixed" when the merge ran under
+    a different provider, otherwise PROVIDER. Keyed on whether a merge RAN, not on the
+    config, because at K=1 none does and the split is purely PROVIDER's however
+    MERGE_PROVIDER is set.
+    """
+    return "mixed" if merge_ran and MERGE_PROVIDER != PROVIDER else PROVIDER
+
+
 def _token_split_fields(tokens_input: int, tokens_output: int,
                         tokens_cache_read: int, tokens_cache_write: int) -> dict:
     """The four token classes as log fields — for the pass, merge and review events alike.
@@ -1592,6 +1614,7 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
                     "tokens": total_tokens,
                     **_token_split_fields(split["input"], split["output"],
                                           split["cache_read"], split["cache_write"]),
+                    "split_provider": _split_provider(False),
                     "cost_usd": round(total_cost, 6),
                     "duration_s": round(time.monotonic() - t0, 1),
                     **_trace_fields(trace_id)}),
@@ -1685,6 +1708,7 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
                 "merged": merged, "tokens": total_tokens,
                 **_token_split_fields(split["input"], split["output"],
                                       split["cache_read"], split["cache_write"]),
+                "split_provider": _split_provider(mm is not None),
                 "cost_usd": round(total_cost, 6),
                 "diff_chars": len(filtered), "diff_truncated": fd.truncated,
                 "duration_s": round(time.monotonic() - t0, 1),

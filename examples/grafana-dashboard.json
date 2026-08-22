@@ -471,7 +471,7 @@
       "type": "timeseries"
     },
     {
-      "__comment": "The attribution layer for the rate panel above. Needs the token split (tokens_input/output/cache_read/cache_write), added to the review, pass and merge events in the same change; these panels are empty for any review logged before that shipped, which is expected and not a broken query. PROVIDER=openrouter only, by design: llama-server reports no cached count, so a local review would contribute a denominator with a structurally-zero numerator and read as 0% cache — and it costs nothing anyway, so it does not belong in a row about money. A local-only estate sees this row empty.",
+      "__comment": "The attribution layer for the rate panel above. Needs the token split (tokens_input/output/cache_read/cache_write), added to the review, pass and merge events in the same change; these panels are empty for any review logged before that shipped, which is expected and not a broken query. Filtered on split_provider=openrouter by design — that field, not `provider`, because `provider` names who ran the passes while the split also pools the merge, and MERGE_PROVIDER is set independently. Anything llama-server touched reports no cached count, so it would contribute a denominator with a structurally-zero numerator and read as 0% cache; it also costs nothing, so it does not belong in a row about money. A local-only estate sees this row empty, which is the honest answer.",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -523,7 +523,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | provider=\"openrouter\" | unwrap tokens_cache_read | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | provider=\"openrouter\" | unwrap tokens | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | split_provider=\"openrouter\" | unwrap tokens_cache_read | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | split_provider=\"openrouter\" | unwrap tokens | __error__=\"\" [$__auto]))",
           "legendFormat": "__auto",
           "queryType": "range",
           "refId": "A"
@@ -570,25 +570,25 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | provider=\"openrouter\" | unwrap tokens_cache_read | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | split_provider=\"openrouter\" | unwrap tokens_cache_read | __error__=\"\" [$__auto]))",
           "legendFormat": "cache read",
           "queryType": "range",
           "refId": "A"
         },
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | provider=\"openrouter\" | unwrap tokens_input | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | split_provider=\"openrouter\" | unwrap tokens_input | __error__=\"\" [$__auto]))",
           "legendFormat": "fresh input",
           "queryType": "range",
           "refId": "B"
         },
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | provider=\"openrouter\" | unwrap tokens_output | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | split_provider=\"openrouter\" | unwrap tokens_output | __error__=\"\" [$__auto]))",
           "legendFormat": "output",
           "queryType": "range",
           "refId": "C"
         },
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | provider=\"openrouter\" | unwrap tokens_cache_write | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | split_provider=\"openrouter\" | unwrap tokens_cache_write | __error__=\"\" [$__auto]))",
           "legendFormat": "cache write",
           "queryType": "range",
           "refId": "D"
@@ -636,7 +636,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | provider=\"openrouter\" | unwrap tokens_output | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | provider=\"openrouter\" | unwrap tokens | __error__=\"\" [$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | split_provider=\"openrouter\" | unwrap tokens_output | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} |= \"tokens_cache_read\" | json | split_provider=\"openrouter\" | unwrap tokens | __error__=\"\" [$__auto]))",
           "legendFormat": "__auto",
           "queryType": "range",
           "refId": "A"
