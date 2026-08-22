@@ -930,6 +930,15 @@ def _chat(base_url: str, api_key: str, model: str, prompt: str, meta: dict | Non
         # The chat API reports no cache-WRITE class. A merge is one stateless call that
         # never reads back what it wrote, so 0 is the honest value, not a missing field.
         meta["tokens_cache_write"] = 0
+        # An envelope can carry components but no authoritative total. Before the split
+        # that only meant `tokens: 0`; now it would mean a zero total sitting beside
+        # non-zero classes, which reads as data loss and breaks any ratio taken against
+        # it. Falling back to the components mirrors what _accumulate_usage already does
+        # on the pi side when totalTokens is absent — and the classes here ARE disjoint
+        # (the subtraction above guarantees it), so the sum is the total, not a guess.
+        if not meta["tokens"]:
+            meta["tokens"] = (meta["tokens_input"] + meta["tokens_output"]
+                              + meta["tokens_cache_read"])
         # NOTE llama-server (MERGE_PROVIDER=local) omits prompt_tokens_details entirely,
         # so cached=0 and the whole prompt is reported as fresh input even when it was
         # served from cache. Not worth faking: a local merge costs nothing, so the class

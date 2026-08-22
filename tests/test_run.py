@@ -1510,6 +1510,22 @@ def test_chat_takes_the_cached_part_out_of_the_prompt_count():
     assert meta["tokens_cache_write"] == 0
 
 
+def test_chat_falls_back_to_the_components_when_the_total_is_missing():
+    # A zero `tokens` beside non-zero classes reads as data loss, and every ratio taken
+    # against it is wrong. The merge's classes are disjoint by construction (the cached
+    # part is subtracted out of prompt_tokens), so summing them IS the total here.
+    run.requests.post = lambda *a, **k: _Resp({
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 20,
+                  "prompt_tokens_details": {"cached_tokens": 800}},
+    })
+    meta = {}
+    run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
+    assert meta["tokens"] == 1020, "200 fresh + 20 out + 800 cached"
+    assert (meta["tokens_input"] + meta["tokens_output"]
+            + meta["tokens_cache_read"]) == meta["tokens"]
+
+
 def test_chat_never_reports_negative_input_when_cached_exceeds_prompt():
     # Two independently reported fields, so the subtraction can invert on a malformed
     # response. A negative token count would poison any sum it landed in.

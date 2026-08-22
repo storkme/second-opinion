@@ -278,9 +278,14 @@ than being "corrected" into figures it never sent. If a provider ever reports a
 cache-exclusive total, the hit-rate panel climbing past 100% is the symptom — deliberately
 not clamped, so it stays visible.
 
-`local` (llama-server) is the exception: it reports no cached count at all, so a local
-merge's prompt is all filed as fresh input. Read the mix panels as hosted-only — a local
-merge costs nothing, so which class it lands in changes no bill.
+`local` (llama-server) reports no cached count at all — for the merge *and* for the review
+passes. So the mix row filters on `provider="openrouter"` rather than caveating: a local
+review would otherwise contribute a real denominator with a structurally-zero numerator,
+reading as 0% cache, which is exactly the total-cache-failure symptom the panel exists to
+raise. Under a mixed setup (`PROVIDER=local` with `MERGE_PROVIDER=openrouter`) the local
+passes would dilute whatever the hosted merge did. A local review also costs nothing, so
+it has no place in a row about money — and a local-only estate correctly sees this row
+empty rather than wrong.
 
 `outcome="merged_on_retry"` is the merge signal worth alerting on: a merge that fails once
 and recovers annotates nothing in CI (the warning fires only when *both* attempts fail), so
