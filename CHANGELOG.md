@@ -15,7 +15,13 @@ All notable changes to this project are documented here. The format follows
   daemon — a price drop that never happened, the mirror of the false signal these panels
   were built to kill. Filtered on `provider`, deliberately not the mix row's
   `split_provider`: that field exists on nothing logged before 1.9.0, so filtering on it
-  would discard the whole history these three panels exist to show.
+  would discard the whole history these three panels exist to show. Both sides of every
+  ratio carry the filter — *Cost per review*'s denominator is a `count_over_time` with no
+  `| json` stage, and filtering only its numerator would have been a no-op, since a free
+  review contributes `$0` to the numerator either way while still counting `+1`.
+  A cross-combo run (`PROVIDER=local`, `MERGE_PROVIDER=openrouter`) has real billed merge
+  spend but `provider=local`, so it is excluded and its cost goes unshown — accepted to
+  keep the history, and noted in each panel's description.
 - **A malformed usage envelope can no longer fabricate merge tokens.** `cached_tokens` is
   clamped to `prompt_tokens` rather than only flooring the subtraction at zero. With
   `prompt_tokens: 10, cached_tokens: 99` the components fallback added to 100 for a call

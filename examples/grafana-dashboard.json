@@ -284,7 +284,7 @@
         "type": "loki",
         "uid": "${datasource}"
       },
-      "description": "Blended USD per million tokens billed. NOT the list price: `tokens` pools four classes that bill an order of magnitude apart ($0.08 fresh input, $0.18 output, $0.016 cache read per Mtok on deepseek-v4-flash-0731), so this line moves with the MIX as much as with the price. Read it next to 'Cache hit rate' — if the mix holds steady and this moves, that is a genuine reprice and nothing else it could be. Sawtooth with a moving hit rate is just caching. Filtered to provider=openrouter: a local review contributes real tokens and $0, which would drag this line down and read as a price drop that never happened. On `provider` rather than the mix row's `split_provider` because split_provider did not exist before v1.9.0, and filtering on it would discard every review logged before then — the history this panel exists to show.",
+      "description": "Blended USD per million tokens billed. NOT the list price: `tokens` pools four classes that bill an order of magnitude apart ($0.08 fresh input, $0.18 output, $0.016 cache read per Mtok on deepseek-v4-flash-0731), so this line moves with the MIX as much as with the price. Read it next to 'Cache hit rate' — if the mix holds steady and this moves, that is a genuine reprice and nothing else it could be. Sawtooth with a moving hit rate is just caching. Filtered to provider=openrouter: a local review contributes real tokens and $0, which would drag this line down and read as a price drop that never happened. On `provider` rather than the mix row's `split_provider` because split_provider did not exist before v1.9.0, and filtering on it would discard every review logged before then — the history this panel exists to show. Known gap: a cross-combo run (PROVIDER=local with MERGE_PROVIDER=openrouter) has real billed merge spend but provider=local, so it is excluded here and its cost goes unshown. Accepted to keep the pre-1.9.0 history; nobody running a single provider is affected.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -332,7 +332,7 @@
         "type": "loki",
         "uid": "${datasource}"
       },
-      "description": "Mean USD per review event, degraded runs included (they cost real money and excluding them flatters the average). Rises when diffs get bigger or K goes up — not when the model repriced. Filtered to provider=openrouter: a local review contributes real tokens and $0, which would drag this line down and read as a price drop that never happened. On `provider` rather than the mix row's `split_provider` because split_provider did not exist before v1.9.0, and filtering on it would discard every review logged before then — the history this panel exists to show.",
+      "description": "Mean USD per review event, degraded runs included (they cost real money and excluding them flatters the average). Rises when diffs get bigger or K goes up — not when the model repriced. Filtered to provider=openrouter: a local review contributes real tokens and $0, which would drag this line down and read as a price drop that never happened. On `provider` rather than the mix row's `split_provider` because split_provider did not exist before v1.9.0, and filtering on it would discard every review logged before then — the history this panel exists to show. Known gap: a cross-combo run (PROVIDER=local with MERGE_PROVIDER=openrouter) has real billed merge spend but provider=local, so it is excluded here and its cost goes unshown. Accepted to keep the pre-1.9.0 history; nobody running a single provider is affected.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -365,7 +365,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" | unwrap cost_usd | __error__=\"\" [$__auto])) / sum(count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"}[$__auto]))",
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" | unwrap cost_usd | __error__=\"\" [$__auto])) / sum(count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | provider=\"openrouter\" [$__auto]))",
           "legendFormat": "__auto",
           "queryType": "range",
           "refId": "A"
@@ -428,7 +428,7 @@
         "type": "loki",
         "uid": "${datasource}"
       },
-      "description": "USD per 100k characters of diff reviewed — cost normalised by the work actually asked for, and the fairest 'are reviews getting dearer' signal here. Posted reviews only: a degraded run has no diff_chars to divide by. A busy day of large PRs leaves it flat; more retries or worse caching raise it. Filtered to provider=openrouter: a local review contributes real tokens and $0, which would drag this line down and read as a price drop that never happened. On `provider` rather than the mix row's `split_provider` because split_provider did not exist before v1.9.0, and filtering on it would discard every review logged before then — the history this panel exists to show.",
+      "description": "USD per 100k characters of diff reviewed — cost normalised by the work actually asked for, and the fairest 'are reviews getting dearer' signal here. Posted reviews only: a degraded run has no diff_chars to divide by. A busy day of large PRs leaves it flat; more retries or worse caching raise it. Filtered to provider=openrouter: a local review contributes real tokens and $0, which would drag this line down and read as a price drop that never happened. On `provider` rather than the mix row's `split_provider` because split_provider did not exist before v1.9.0, and filtering on it would discard every review logged before then — the history this panel exists to show. Known gap: a cross-combo run (PROVIDER=local with MERGE_PROVIDER=openrouter) has real billed merge spend but provider=local, so it is excluded here and its cost goes unshown. Accepted to keep the pre-1.9.0 history; nobody running a single provider is affected.",
       "fieldConfig": {
         "defaults": {
           "custom": {
