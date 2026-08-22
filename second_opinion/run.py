@@ -1309,26 +1309,19 @@ def _token_split_fields(tokens_input: int, tokens_output: int,
     provider for the same call. What is unsound is treating the four as a partition:
     deriving one class by subtracting the others gives a number the provider never said.
 
-    WHAT PI ACTUALLY SENDS, measured rather than assumed: across every real pi usage
-    record on this machine carrying a cacheRead (13 of them),
-    `totalTokens == input + output + cacheRead + cacheWrite` exactly — the four are
-    DISJOINT and `input` is fresh input alone. Independently, 30 days of billed reviews
-    came to $0.0369 per Mtok of `tokens`, under the $0.08/Mtok floor for fresh input,
-    which only cache reads at $0.016/Mtok can explain: they are inside the total.
+    What pi actually sends is disjoint — `totalTokens == input + output + cacheRead +
+    cacheWrite` on every real usage record, so cache reads are inside `tokens` without
+    being inside `input`. The mix panels need both halves of that: the first makes
+    `tokens_cache_read / tokens` a share, the second keeps the stacked panel free of
+    overlap. Measured, not assumed, and the evidence plus the folding-provider case that
+    keeps being mistaken for it live where that confusion starts — see the fixtures in
+    test_read_session_usage_prefers_authoritative_total_tokens and
+    test_finish_pass_leaves_a_folding_providers_numbers_alone.
 
-    Both reviews of the PR that added this got tangled here, in OPPOSITE directions, and
-    the cause is worth naming. The fixture in
-    test_read_session_usage_prefers_authoritative_total_tokens is a SYNTHETIC folding
-    provider — input already containing cacheRead — written to prove that totalTokens
-    beats the component sum. It is not a sample of what pi sends. Read as canonical it
-    implies either that cache reads sit outside `tokens` (so the hit-rate panel could
-    exceed 100%) or that they sit inside `input` (so the stacked mix panel double-counts
-    them). Neither is true of this provider.
-
-    So today the four do sum to `tokens`. Nothing ENFORCES it — totalTokens is taken
-    verbatim, and a genuinely folding provider would break the identity. Which is why
-    nothing is normalised on the way in and no panel derives a class by subtracting the
-    others: a number the provider never sent is worse than one that does not add up.
+    So the four do sum to `tokens` today, and nothing ENFORCES it: totalTokens is taken
+    verbatim, and a folding provider would break the identity. Hence no normalisation on
+    the way in and no panel deriving a class by subtracting the others — a number the
+    provider never sent is worse than one that does not add up.
     """
     return {"tokens_input": tokens_input, "tokens_output": tokens_output,
             "tokens_cache_read": tokens_cache_read,
