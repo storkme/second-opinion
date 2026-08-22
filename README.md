@@ -212,18 +212,22 @@ extra detail costs no extra round trip.
 // e.g. outcome="posted". Everything else rides in the JSON line, parsed by `| json`:
 {"event": "review", "pr": 574, "sha": "…", "model": "deepseek/deepseek-v4-flash-0731",
  "provider": "openrouter", "k": 1, "pass_statuses": "ok", "passes_ok": 1,
- "passes_degraded": 0, "merged": true, "tokens": 184000, "cost_usd": 0.031,
- "diff_chars": 41200, "diff_truncated": false, "duration_s": 412.3}
+ "passes_degraded": 0, "merged": true, "tokens": 184000, "tokens_input": 21000,
+ "tokens_output": 4300, "tokens_cache_read": 158000, "tokens_cache_write": 700,
+ "cost_usd": 0.031, "diff_chars": 41200, "diff_truncated": false, "duration_s": 412.3}
 
 // One per pass. outcome = that pass's own status, so a single selector finds every
 // timeout across every repo: {service="second-opinion", event="pass", outcome="timeout"}
 {"event": "pass", "pr": 574, "sha": "…", "k": 3, "pass": 2, "status": "timeout",
- "tokens": 912345, "cost_usd": 0.503, "chars": 0, "elapsed_s": 1800.0}
+ "tokens": 912345, "tokens_input": 104000, "tokens_output": 21000,
+ "tokens_cache_read": 780000, "tokens_cache_write": 7000,
+ "cost_usd": 0.503, "chars": 0, "elapsed_s": 1800.0}
 
 // The K>1 merge. outcome = merged | merged_on_retry | fallback.
 {"event": "merge", "pr": 574, "sha": "…", "provider": "openrouter", "merged": false,
  "attempts": 2, "failures": "raised RuntimeError: 402 …; returned no usable content",
- "tokens": 21000, "cost_usd": 0.011}
+ "tokens": 21000, "tokens_input": 4000, "tokens_output": 900,
+ "tokens_cache_read": 16100, "tokens_cache_write": 0, "cost_usd": 0.011}
 ```
 
 The `review` event's `pass_statuses` says *which* pass died; the `pass` event says what
@@ -233,6 +237,25 @@ are pooled, so a pass that failed instantly and one that burned 12.6M tokens fir
 `sum(pass.tokens) ≤ review.tokens`: the difference is the `K>1` merge call, which is not
 a pass. At `K=1` a pass event is still worth having — `elapsed_s` is model time alone,
 while the review's `duration_s` also covers diff fetch, worktree setup and posting.
+
+### The four token classes
+
+Every spending event carries `tokens_input` / `tokens_output` / `tokens_cache_read` /
+`tokens_cache_write` beside the pooled `tokens`, because they bill an order of magnitude
+apart — for `deepseek-v4-flash-0731`, **$0.08 / $0.18 / $0.016** per Mtok for fresh input,
+output and cache reads. Pooled, `cost_usd / tokens` is a blend of price *and* mix: a
+provider reprice and a collapse in cache hits move it the same way by a similar amount,
+and no query can separate them. Split, `tokens_cache_read / tokens` charts the cache hit
+rate directly, which is usually the larger lever on the bill — hits falling from 90% to
+50% roughly triples spend with the list price untouched.
+
+**They are not a partition and must not be treated as one.** `tokens` is the provider's
+own authoritative total wherever it reports one (pi prefers its per-message `totalTokens`
+over the components), and some providers already fold cached tokens into their input
+count, so the four need not sum to it. Ratios against `tokens` are sound; deriving a
+fifth class by subtracting the other four is not — that number came from arithmetic, not
+from the provider. The merge call is the one case made deliberately disjoint, by
+subtracting `prompt_tokens_details.cached_tokens` out of `prompt_tokens` in `_chat`.
 
 `outcome="merged_on_retry"` is the merge signal worth alerting on: a merge that fails once
 and recovers annotates nothing in CI (the warning fires only when *both* attempts fail), so
@@ -249,8 +272,11 @@ present, `0` when healthy): a mistyped `max-pass-tokens` disables that ceiling a
   needs only the URL.
 - **Dashboard:** import [`examples/grafana-dashboard.json`](examples/grafana-dashboard.json)
   and point it at your Loki data source — reviews by outcome, cost/tokens per repo,
-  review and pass duration p50/p95, degraded passes ranked by what they burned, review
-  rounds per PR, daemon liveness, and a raw event log. It also asks for a **Tempo** data
+  unit economics (effective $/Mtok, cost per review, cost per 100k diff chars), token mix
+  (cache hit rate, the four classes stacked, output share), review and pass duration
+  p50/p95, degraded passes ranked by what they burned, review rounds per PR, daemon
+  liveness, and a raw event log. The token-mix row reads empty for reviews logged before
+  the split shipped — no query is broken, the fields simply were not emitted yet. It also asks for a **Tempo** data
   source, used only by the trace links in the two tables; leave it unset if you don't run
   [tracing](#tracing-optional) and every other panel is unaffected.
 - **Contract:** off by default (no `LOKI_URL` = no network call, so `PROVIDER=local`

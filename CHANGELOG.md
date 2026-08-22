@@ -5,6 +5,34 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Added
+- **The token split: `tokens_input` / `tokens_output` / `tokens_cache_read` /
+  `tokens_cache_write` on every `review`, `pass` and `merge` event.** The pooled `tokens`
+  count could not answer the question a spend spike actually raises. Its four components
+  bill an order of magnitude apart — for `deepseek-v4-flash-0731`, $0.08 / $0.18 / $0.016
+  per Mtok for fresh input, output and cache reads — so `cost_usd / tokens` is a blend of
+  price *and* mix, and a provider reprice, a cache regression and a chattier prompt all
+  move it the same way by a similar amount. Chasing a $7.80 review night on 2026-08-21
+  ended at exactly that wall: the effective rate had wobbled between $0.024 and $0.057
+  per Mtok all month with no way to attribute any of it. Split, `tokens_cache_read /
+  tokens` charts the cache hit rate directly, which is usually the bigger lever on the
+  bill than list price ever is — hits falling from 90% to 50% roughly triples spend with
+  the price untouched. No new data source: `_read_session_usage` already separated all
+  four and `_finish_pass` discarded them one line before building the `PassResult`.
+  The merge call gets its own split from the chat API's `usage`, with
+  `prompt_tokens_details.cached_tokens` **subtracted** out of `prompt_tokens` — that
+  shape counts cached tokens inside the prompt total, and without the subtraction every
+  cache hit would be counted twice in the class charts built to measure it.
+  **The four are not a partition** and the docs say so in both places: `tokens` is the
+  provider's authoritative total wherever it gives one, and some providers fold cached
+  tokens into their input count, so ratios against `tokens` are sound but deriving a
+  fifth class by subtraction is not.
+- **Dashboard: a *Token mix* row** — cache hit rate, the four classes stacked, and
+  effective $/Mtok beside them, so a bill that moves can be attributed to the mix or to
+  the price instead of guessed at.
+
 ## [1.8.2] - 2026-08-09
 
 ### Added

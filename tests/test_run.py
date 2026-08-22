@@ -1492,6 +1492,37 @@ def test_chat_captures_usage_cost_in_meta():
     assert meta["reasoning_tokens"] == 55
 
 
+def test_chat_takes_the_cached_part_out_of_the_prompt_count():
+    # The chat API counts cached tokens INSIDE prompt_tokens; pi reports them alongside
+    # input. Without the subtraction the same 800 tokens are billed to two classes and
+    # the cache-hit panel — the whole point of splitting — reads high by its own numerator.
+    run.requests.post = lambda *a, **k: _Resp({
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 20, "total_tokens": 1020,
+                  "prompt_tokens_details": {"cached_tokens": 800}},
+    })
+    meta = {}
+    run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
+    assert meta["tokens_cache_read"] == 800
+    assert meta["tokens_input"] == 200, "fresh input is prompt minus the cached part"
+    assert meta["tokens_output"] == 20
+    # A merge is one stateless call: it writes no cache entry it then reads back.
+    assert meta["tokens_cache_write"] == 0
+
+
+def test_chat_never_reports_negative_input_when_cached_exceeds_prompt():
+    # Two independently reported fields, so the subtraction can invert on a malformed
+    # response. A negative token count would poison any sum it landed in.
+    run.requests.post = lambda *a, **k: _Resp({
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 1,
+                  "prompt_tokens_details": {"cached_tokens": 99}},
+    })
+    meta = {}
+    run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
+    assert meta["tokens_input"] == 0
+
+
 def test_chat_keeps_valid_content_when_usage_metadata_is_malformed():
     run.requests.post = lambda *a, **k: _Resp({
         "choices": [{"message": {"content": "usable review"}}],
@@ -1501,7 +1532,9 @@ def test_chat_keeps_valid_content_when_usage_metadata_is_malformed():
     meta = {}
     out = run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
     assert out == "usable review"
-    assert meta == {"cost": 0.0, "tokens": 0, "reasoning_tokens": 0}
+    assert meta == {"cost": 0.0, "tokens": 0, "reasoning_tokens": 0,
+                    "tokens_input": 0, "tokens_output": 0,
+                    "tokens_cache_read": 0, "tokens_cache_write": 0}
 
 
 def test_failure_notice_includes_run_url():
@@ -1613,6 +1646,29 @@ def test_read_session_usage_prefers_authoritative_total_tokens():
         import shutil
         shutil.rmtree(d, ignore_errors=True)
 
+
+
+def test_finish_pass_carries_the_token_breakdown():
+    # The four classes bill at rates an order of magnitude apart, so a pooled total
+    # cannot distinguish a price change from a cache regression. This is the read that
+    # used to be thrown away one line before the PassResult was built.
+    d = tempfile.mkdtemp(prefix="so-sess-split-test-")
+    try:
+        with open(os.path.join(d, "pass.jsonl"), "w") as f:
+            f.write('{"message":{"usage":{"input":100,"output":10,"cacheRead":50,'
+                    '"cacheWrite":5,"totalTokens":110,"cost":{"total":0.03}}}}\n')
+        result = run._finish_pass("m", d, False, "review", "ok")
+        assert result.tokens_input == 100
+        assert result.tokens_output == 10
+        assert result.tokens_cache_read == 50
+        assert result.tokens_cache_write == 5
+        # Deliberately NOT 165. pi's authoritative totalTokens wins (the sibling test
+        # pins why), so the components are the provider's component counts and nothing
+        # more — a panel that derives one by subtracting the others is inventing data.
+        assert result.tokens == 110
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_run_pass_uses_provided_session_dir():
@@ -1823,6 +1879,96 @@ def test_review_pr_emits_one_pass_event_per_pass_with_its_own_spend():
     finally:
         run.K, run.run_pass, run.PROVIDER = real
         run.merge_reviews = real_merge
+        _restore_review_pr_deps(real_deps)
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_event_token_split_covers_the_passes_and_the_merge():
+    # The review event pools spend across K passes plus the merge call. Its split has to
+    # cover exactly the same calls, or the cache-hit ratio charted from it describes a
+    # different review than the cost beside it. Every number here is distinct so any
+    # dropped or double-counted contributor changes a total.
+    real = (run.K, run.run_pass, run.PROVIDER)
+    run.K, run.PROVIDER = 2, "local"  # local => sequential, deterministic pass order
+    real_deps = _stub_review_pr_deps()
+    results = iter([
+        run.PassResult("finding one", "ok", cost=0.01, tokens=1000,
+                       tokens_input=100, tokens_output=20,
+                       tokens_cache_read=800, tokens_cache_write=80),
+        run.PassResult("finding two", "ok", cost=0.02, tokens=2000,
+                       tokens_input=200, tokens_output=40,
+                       tokens_cache_read=1600, tokens_cache_write=160)])
+    run.run_pass = lambda wt, m, s, u, session_dir=None: next(results)
+    real_merge = run.merge_reviews
+
+    def fake_merge(pr, title, passes, model, meta=None):
+        if meta is not None:
+            meta.update({"cost": 0.05, "tokens": 300, "merged": True, "attempts": 1,
+                         "tokens_input": 30, "tokens_output": 6,
+                         "tokens_cache_read": 240, "tokens_cache_write": 24})
+        return "merged body"
+
+    run.merge_reviews = fake_merge
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = run.review_pr(11, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert out.posted is True
+        review = [f for e, _l, f in events if e == "review"]
+        assert len(review) == 1, events
+        f = review[0]
+        # 100 + 200 passes + 30 merge, and so on for each class.
+        assert f["tokens_input"] == 330
+        assert f["tokens_output"] == 66
+        assert f["tokens_cache_read"] == 2640
+        assert f["tokens_cache_write"] == 264
+        # Same contributors as the pooled figures beside them: 1000 + 2000 + 300.
+        assert f["tokens"] == 3300
+        assert f["cost_usd"] == 0.08
+        # The merge is a call of its own and carries its own split, so "what did merging
+        # cost" stays answerable without subtracting the passes from the review.
+        merge = [mf for e, _l, mf in events if e == "merge"]
+        assert len(merge) == 1
+        assert merge[0]["tokens_cache_read"] == 240 and merge[0]["tokens_input"] == 30
+    finally:
+        run.K, run.run_pass, run.PROVIDER = real
+        run.merge_reviews = real_merge
+        _restore_review_pr_deps(real_deps)
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_degraded_review_event_carries_the_split_of_what_it_burned():
+    # An all-passes-failed review is where the split matters most: the review event is
+    # the only record of the spend, and "2M cache reads" and "2M fresh input" are the
+    # same pooled number at 5x the price.
+    real = (run.K, run.run_pass)
+    run.K = 1
+    real_deps = _stub_review_pr_deps()
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult(
+        "", "timeout", cost=0.40, tokens=900_000,
+        tokens_input=500_000, tokens_output=0,
+        tokens_cache_read=400_000, tokens_cache_write=0)
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(12, "t", "cafebabe00", "m", "m", dry_run=False)
+        review = [(labels, f) for e, labels, f in events if e == "review"]
+        assert len(review) == 1, events
+        labels, f = review[0]
+        assert labels["outcome"] == "degraded"
+        assert f["tokens_input"] == 500_000
+        assert f["tokens_cache_read"] == 400_000
+        assert f["tokens"] == 900_000
+    finally:
+        run.K, run.run_pass = real
         _restore_review_pr_deps(real_deps)
         real_emit()
         run._annotate = _REAL_ANNOTATE

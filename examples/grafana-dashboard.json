@@ -2,12 +2,18 @@
   "__comment": "second-opinion monitoring dashboard. Import via Grafana → Dashboards → Import, then pick your Loki data source. Expects the reviewer's Loki events (set LOKI_URL / loki-url; see README 'Monitoring'). Works against Grafana Cloud Loki and self-hosted Loki alike. The Tempo data source is optional and only powers the trace links in the two tables — leave it unset unless you also run tracing (otlp-endpoint).",
   "title": "second-opinion",
   "uid": "second-opinion",
-  "tags": ["second-opinion", "code-review"],
+  "tags": [
+    "second-opinion",
+    "code-review"
+  ],
   "timezone": "browser",
   "editable": true,
   "graphTooltip": 1,
   "schemaVersion": 39,
-  "time": { "from": "now-30d", "to": "now" },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
@@ -31,13 +37,24 @@
         "name": "repo",
         "label": "Repository",
         "type": "query",
-        "datasource": { "type": "loki", "uid": "${datasource}" },
+        "datasource": {
+          "type": "loki",
+          "uid": "${datasource}"
+        },
         "query": "label_values({service=\"second-opinion\"}, repo)",
         "refresh": 2,
         "allValue": ".*",
         "multi": true,
         "includeAll": true,
-        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
       }
     ]
   },
@@ -46,8 +63,16 @@
       "id": 1,
       "type": "stat",
       "title": "Reviews posted",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
@@ -56,15 +81,29 @@
         }
       ],
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
         "graphMode": "none",
         "colorMode": "value"
       },
       "fieldConfig": {
         "defaults": {
           "noValue": "0",
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       }
@@ -74,8 +113,16 @@
       "type": "stat",
       "title": "Degraded / errored",
       "description": "Reviews that posted nothing (or errored). This is the reviewer-malfunction rate — the runtime counterpart of the fail-on-degraded tripwire.",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
@@ -84,19 +131,31 @@
         }
       ],
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
         "graphMode": "none",
         "colorMode": "value"
       },
       "fieldConfig": {
         "defaults": {
           "noValue": "0",
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
             ]
           }
         },
@@ -108,8 +167,16 @@
       "type": "stat",
       "title": "Review spend",
       "description": "Sum of per-review cost estimates (list-price based for agentic passes, so treat as ≈).",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
@@ -118,7 +185,11 @@
         }
       ],
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
         "graphMode": "none",
         "colorMode": "value"
       },
@@ -127,8 +198,18 @@
           "noValue": "0",
           "unit": "currencyUSD",
           "decimals": 2,
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       }
@@ -137,8 +218,16 @@
       "id": 4,
       "type": "stat",
       "title": "Tokens",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
@@ -147,7 +236,11 @@
         }
       ],
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
         "graphMode": "none",
         "colorMode": "value"
       },
@@ -155,18 +248,418 @@
         "defaults": {
           "noValue": "0",
           "unit": "short",
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       }
     },
     {
+      "__comment": "Added 2026-08-22 after a $7.80 review night read as 'the model got more expensive'. It hadn't: these separate the RATE from the VOLUME, which the spend panels above deliberately pool (they answer 'what did today cost', not 'why'). A flat rate under a rising bill means more reviews or bigger diffs.",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 20,
+      "panels": [],
+      "title": "Unit economics — rate, not volume",
+      "type": "row"
+    },
+    {
+      "__comment": "The headline 'did the price go up' panel, and the one most likely to be misread on its own — which is why the token-mix row below exists.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "description": "Blended USD per million tokens billed. NOT the list price: `tokens` pools four classes that bill an order of magnitude apart ($0.08 fresh input, $0.18 output, $0.016 cache read per Mtok on deepseek-v4-flash-0731), so this line moves with the MIX as much as with the price. Read it next to 'Cache hit rate' — if the mix holds steady and this moves, that is a genuine reprice and nothing else it could be. Sawtooth with a moving hit rate is just caching.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true
+          },
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 5
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "1e6 * sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap cost_usd | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__auto]))",
+          "legendFormat": "__auto",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Effective rate ($ / Mtok)",
+      "type": "timeseries"
+    },
+    {
+      "__comment": "Mean not median: the tail IS the bill, and a p50 would hide the 12-round PR that dominated the night of 2026-08-21.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "description": "Mean USD per review event, degraded runs included (they cost real money and excluding them flatters the average). Rises when diffs get bigger or K goes up — not when the model repriced.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true
+          },
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 5
+      },
+      "id": 22,
+      "options": {
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap cost_usd | __error__=\"\" [$__auto])) / sum(count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"}[$__auto]))",
+          "legendFormat": "__auto",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost per review (mean)",
+      "type": "timeseries"
+    },
+    {
+      "__comment": "The decomposition term.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "description": "Mean tokens per review — the volume half of cost per review. cost/review = tokens/review x rate, so any two of these three panels explain the third.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 5
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__auto])) / sum(count_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"}[$__auto]))",
+          "legendFormat": "__auto",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Tokens per review (mean)",
+      "type": "timeseries"
+    },
+    {
+      "__comment": "The one to trust when the bill jumps. Volume-invariant by construction.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "description": "USD per 100k characters of diff reviewed — cost normalised by the work actually asked for, and the fairest 'are reviews getting dearer' signal here. Posted reviews only: a degraded run has no diff_chars to divide by. A busy day of large PRs leaves it flat; more retries or worse caching raise it.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true
+          },
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 5
+      },
+      "id": 24,
+      "options": {
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "1e5 * sum(sum_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"${repo:regex}\"} | json | unwrap cost_usd | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"${repo:regex}\"} | json | unwrap diff_chars | __error__=\"\" [$__auto]))",
+          "legendFormat": "__auto",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost per 100k diff chars",
+      "type": "timeseries"
+    },
+    {
+      "__comment": "The attribution layer for the rate panel above. Needs the token split (tokens_input/output/cache_read/cache_write), added to the review, pass and merge events in the same change; these panels are empty for any review logged before that shipped, which is expected and not a broken query.",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "id": 25,
+      "panels": [],
+      "title": "Token mix — where the money actually goes",
+      "type": "row"
+    },
+    {
+      "__comment": "The panel this whole row was built for. Ratio against `tokens` deliberately — the four classes are not a partition and must not be summed to form a denominator (see _token_split_fields in run.py).",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "description": "Cached share of the tokens actually billed. Usually the biggest single lever on this bill: cache reads cost 1/5 of fresh input and 1/11 of output, so hits falling from 90% to 50% roughly triples spend with the list price untouched. A drop here explains a rising effective rate; a steady line means the rate moved for some other reason.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true
+          },
+          "unit": "percentunit",
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 14
+      },
+      "id": 26,
+      "options": {
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_cache_read | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__auto]))",
+          "legendFormat": "__auto",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Cache hit rate",
+      "type": "timeseries"
+    },
+    {
+      "__comment": "Ordered cache read / input / output so the stack reads cheap-to-dear bottom-up and a widening top band is visibly the expensive one.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "description": "The four classes as reported, stacked. Cheapest at the bottom, so a healthy review is mostly the bottom band. Stacked height is NOT `tokens` — these are the provider's component counts and `tokens` is its authoritative total, which for some providers already folds cached tokens into input.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 14
+      },
+      "id": 27,
+      "options": {
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_cache_read | __error__=\"\" [$__auto]))",
+          "legendFormat": "cache read",
+          "queryType": "range",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_input | __error__=\"\" [$__auto]))",
+          "legendFormat": "fresh input",
+          "queryType": "range",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_output | __error__=\"\" [$__auto]))",
+          "legendFormat": "output",
+          "queryType": "range",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_cache_write | __error__=\"\" [$__auto]))",
+          "legendFormat": "cache write",
+          "queryType": "range",
+          "refId": "D"
+        }
+      ],
+      "title": "Token mix",
+      "type": "timeseries"
+    },
+    {
+      "__comment": "The other half of the mix story: cache hit rate explains the cheap end, this explains the dear end.",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "description": "Output's share of billed tokens. Output is the dearest class at $0.18/Mtok — 11x a cache read — so a small rise here moves the effective rate more than its size suggests. Climbs when the model reasons or writes more per review, which is a prompt/model change, not a price change.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": true
+          },
+          "unit": "percentunit",
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 14
+      },
+      "id": 28,
+      "options": {
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens_output | __error__=\"\" [$__auto])) / sum(sum_over_time({service=\"second-opinion\", event=\"review\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__auto]))",
+          "legendFormat": "__auto",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Output share",
+      "type": "timeseries"
+    },
+    {
       "id": 5,
       "type": "timeseries",
       "title": "Reviews by outcome",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
       "targets": [
         {
           "refId": "A",
@@ -177,7 +670,13 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
           "unit": "short",
           "decimals": 0
         },
@@ -188,8 +687,16 @@
       "id": 6,
       "type": "timeseries",
       "title": "Cost by repo (≈ USD)",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
       "targets": [
         {
           "refId": "A",
@@ -200,7 +707,13 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
           "unit": "currencyUSD"
         },
         "overrides": []
@@ -211,8 +724,16 @@
       "type": "timeseries",
       "title": "Review duration",
       "description": "Wall-clock per review (all K passes + merge + post).",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
       "targets": [
         {
           "refId": "A",
@@ -229,7 +750,11 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "spanNulls": true
+          },
           "unit": "s"
         },
         "overrides": []
@@ -239,8 +764,16 @@
       "id": 8,
       "type": "timeseries",
       "title": "Tokens by repo",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
       "targets": [
         {
           "refId": "A",
@@ -251,7 +784,13 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
           "unit": "short"
         },
         "overrides": []
@@ -262,8 +801,16 @@
       "type": "table",
       "title": "Review rounds per PR",
       "description": "How many second-opinion reviews each PR has accumulated in the selected range (a force-push mints a new head SHA and earns a fresh round). Counts posted reviews only — skipped/degraded attempts are not rounds.",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
       "targets": [
         {
           "refId": "A",
@@ -271,16 +818,34 @@
           "expr": "topk(25, sum by (repo, pr) (count_over_time({service=\"second-opinion\", event=\"review\", outcome=\"posted\", repo=~\"${repo:regex}\"} | json [$__range])))"
         }
       ],
-      "transformations": [{ "id": "labelsToFields", "options": {} }],
-      "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] }
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {}
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      }
     },
     {
       "id": 10,
       "type": "timeseries",
       "title": "Sweeps (daemon liveness)",
       "description": "One event per daemon sweep (delivery=daemon only — Action runs also emit sweep events, and unscoped they would paper over a real gap in the daemon's cadence). A gap here means the daemon is down or wedged. Outcomes: ok = healthy sweep; silent_failure = sweep ran but ≥1 review degraded/errored with nothing posted; skipped = local llama-server unreachable; error = sweeps running but throwing before completing.",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
       "targets": [
         {
           "refId": "A",
@@ -291,7 +856,13 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
           "unit": "short",
           "decimals": 0
         },
@@ -303,8 +874,16 @@
       "type": "table",
       "title": "Degraded passes — what they burned",
       "description": "Every pass that did NOT end 'ok', ranked by tokens spent before it stopped. The review event pools spend across all K passes, so it cannot distinguish a pass that died instantly from one that burned millions first (the runaway signature: 12.6M tokens, $1.96, zero output). A large number here with status=timeout is the case for max-pass-tokens; a small one means the pass failed early and a spend ceiling would not have helped. Click the trace id to see WHERE it stopped — the tokens say how much it burned, the waterfall says on which turn. Blank trace column = tracing was off for that repo.",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 46
+      },
       "targets": [
         {
           "refId": "A",
@@ -312,12 +891,23 @@
           "expr": "topk(25, sum by (repo, pr, pass, status, trace_id) (max_over_time({service=\"second-opinion\", event=\"pass\", outcome!=\"ok\", repo=~\"${repo:regex}\"} | json | unwrap tokens | __error__=\"\" [$__range])))"
         }
       ],
-      "transformations": [{ "id": "labelsToFields", "options": {} }],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {}
+        }
+      ],
       "fieldConfig": {
-        "defaults": { "unit": "short", "decimals": 0 },
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "trace_id" },
+            "matcher": {
+              "id": "byName",
+              "options": "trace_id"
+            },
             "properties": [
               {
                 "id": "links",
@@ -339,8 +929,16 @@
       "type": "timeseries",
       "title": "Pass duration",
       "description": "Wall-clock per agentic pass. Read against 'Review duration': that panel also includes diff fetch, worktree setup, merge and post, so the gap between the two is harness overhead rather than model time. Watch for a rising curve — a pass timeout is usually the end of a latency creep, not a sudden hang.",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 46
+      },
       "targets": [
         {
           "refId": "A",
@@ -357,7 +955,11 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "spanNulls": true
+          },
           "unit": "s"
         },
         "overrides": []
@@ -368,8 +970,16 @@
       "type": "timeseries",
       "title": "Union merge health (K>1)",
       "description": "The K>1 editorial merge. merged = first attempt worked; merged_on_retry = attempt 1 failed and the retry saved it; fallback = both failed and the raw passes were posted unmerged. Only 'fallback' annotates in CI, so merged_on_retry appearing at all is the early warning — it is the same failure, one attempt short of costing you the union. A sustained run of either is usually the provider, not chance: a 402 followed by an empty 200 is credits exhaustion, which recurs every sweep until fixed (check the 'failures' field in the forensics panel).",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 54
+      },
       "targets": [
         {
           "refId": "A",
@@ -380,7 +990,13 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
           "unit": "short",
           "decimals": 0
         },
@@ -392,8 +1008,16 @@
       "type": "table",
       "title": "Slowest reviews — click a trace id for the waterfall",
       "description": "The way in to a single review's shape. The events tell you a review took 726s; the trace tells you where the 726s went — which pass, which model turn, how many output tokens it was emitting at the time. Ranked slowest first, because that is the review worth opening. Empty unless tracing is on (otlp-endpoint): the trace id is the join key between these events and Tempo, and it is only emitted when a trace was actually exported, so a row here always has a trace behind it. Links need the Tempo data source variable set at the top.",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 44 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      },
       "targets": [
         {
           "refId": "A",
@@ -402,8 +1026,18 @@
         }
       ],
       "transformations": [
-        { "id": "labelsToFields", "options": {} },
-        { "id": "organize", "options": { "renameByName": { "Value": "duration" } } }
+        {
+          "id": "labelsToFields",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "duration"
+            }
+          }
+        }
       ],
       "fieldConfig": {
         "defaults": {
@@ -413,7 +1047,10 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "trace_id" },
+            "matcher": {
+              "id": "byName",
+              "options": "trace_id"
+            },
             "properties": [
               {
                 "id": "links",
@@ -434,8 +1071,16 @@
       "id": 11,
       "type": "logs",
       "title": "Recent events (forensics)",
-      "datasource": { "type": "loki", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 52 },
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 70
+      },
       "targets": [
         {
           "refId": "A",
