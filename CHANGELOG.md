@@ -19,9 +19,21 @@ All notable changes to this project are documented here. The format follows
   ratio carry the filter — *Cost per review*'s denominator is a `count_over_time` with no
   `| json` stage, and filtering only its numerator would have been a no-op, since a free
   review contributes `$0` to the numerator either way while still counting `+1`.
-  A cross-combo run (`PROVIDER=local`, `MERGE_PROVIDER=openrouter`) has real billed merge
-  spend but `provider=local`, so it is excluded and its cost goes unshown — accepted to
-  keep the history, and noted in each panel's description.
+  Both cross combos are excluded via `split_provider!="mixed"` — the reverse direction
+  (`PROVIDER=openrouter` with a local merge) is tagged `provider=openrouter` and would
+  otherwise pool the merge's free tokens into a money denominator. `!=` rather than
+  `="openrouter"` is what preserves the history: a pre-1.9.0 event has no
+  `split_provider`, compares as empty, and passes. A `PROVIDER=local` run with an
+  openrouter merge still has its real merge spend excluded — accepted, and noted in each
+  panel's description.
+- **Cost/tokens per review no longer count reviews that reported neither.** `error` and
+  `skipped` reviews carry no `tokens` or `cost_usd`, so they fell out of the numerator's
+  unwrap while still adding `+1` to the `count_over_time` denominator. Degraded reviews
+  stay counted: they have both, and they are real money.
+- **A cached count is no longer discarded when `prompt_tokens` is missing.** The clamp
+  added above enforces "cached cannot exceed the prompt it is part of"; with no prompt
+  reported there is no such bound, and zeroing the provider's own figure loses information
+  rather than avoiding invention.
 - **A malformed usage envelope can no longer fabricate merge tokens.** `cached_tokens` is
   clamped to `prompt_tokens` rather than only flooring the subtraction at zero. With
   `prompt_tokens: 10, cached_tokens: 99` the components fallback added to 100 for a call

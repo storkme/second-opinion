@@ -1544,6 +1544,22 @@ def test_chat_never_reports_negative_input_when_cached_exceeds_prompt():
     assert meta["tokens"] == 11, "prompt_tokens + completion_tokens, not 0 + 1 + 99"
 
 
+def test_chat_keeps_a_reported_cache_count_when_the_prompt_size_is_missing():
+    # A different malformed shape from the cached>prompt one: no prompt_tokens at all.
+    # The clamp must not fire here — there is no bound to enforce, and zeroing a count the
+    # provider actually sent would lose information rather than avoid inventing it.
+    run.requests.post = lambda *a, **k: _Resp({
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"completion_tokens": 1,
+                  "prompt_tokens_details": {"cached_tokens": 99}},
+    })
+    meta = {}
+    run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
+    assert meta["tokens_cache_read"] == 99, "reported, so kept"
+    assert meta["tokens_input"] == 0, "never negative"
+    assert meta["tokens"] == 100
+
+
 def test_chat_keeps_valid_content_when_usage_metadata_is_malformed():
     run.requests.post = lambda *a, **k: _Resp({
         "choices": [{"message": {"content": "usable review"}}],
