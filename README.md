@@ -212,9 +212,11 @@ extra detail costs no extra round trip.
 // e.g. outcome="posted". Everything else rides in the JSON line, parsed by `| json`:
 {"event": "review", "pr": 574, "sha": "…", "model": "deepseek/deepseek-v4-flash-0731",
  "provider": "openrouter", "k": 1, "pass_statuses": "ok", "passes_ok": 1,
- "passes_degraded": 0, "merged": true, "tokens": 184000, "tokens_input": 21000,
+ "passes_degraded": 0, "merged": true, "tokens": 184000, "tokens_input": 26100,
  "tokens_output": 4300, "tokens_cache_read": 158000, "tokens_cache_write": 700,
  "cost_usd": 0.031, "diff_chars": 41200, "diff_truncated": false, "duration_s": 412.3}
+// ^ the four do NOT sum to `tokens` here, and that is the realistic case, not a typo:
+// this provider folds cached tokens into its input count. See "The four token classes".
 
 // One per pass. outcome = that pass's own status, so a single selector finds every
 // timeout across every repo: {service="second-opinion", event="pass", outcome="timeout"}
@@ -257,6 +259,21 @@ fifth class by subtracting the other four is not — that number came from arith
 from the provider. The merge call is the one case made deliberately disjoint, by
 subtracting `prompt_tokens_details.cached_tokens` out of `prompt_tokens` in `_chat`.
 
+**`tokens` does include cache reads**, which is what makes `tokens_cache_read / tokens` a
+share rather than a nonsense ratio. Worth stating because the unit test that pins pi's
+authoritative total cannot show it — its `totalTokens: 110` is equally `input(100) +
+output(10)` or `fresh(50) + cached(50) + output(10)`, and a reviewer of the PR that added
+this read it the second way. The billing settles it: thirty days of real reviews cost
+**$0.0369 per Mtok** of `tokens`, and the cheapest class here is fresh input at
+$0.08/Mtok. Nothing counting only fresh input and output can bill at half the floor price
+of its cheapest member — only cache reads at $0.016/Mtok get you there. If a provider ever
+reports a cache-exclusive total, the hit-rate panel climbing past 100% is the symptom, and
+it is deliberately not clamped so that stays visible.
+
+`local` (llama-server) is the exception: it reports no cached count at all, so a local
+merge's prompt is all filed as fresh input. Read the mix panels as hosted-only — a local
+merge costs nothing, so which class it lands in changes no bill.
+
 `outcome="merged_on_retry"` is the merge signal worth alerting on: a merge that fails once
 and recovers annotates nothing in CI (the warning fires only when *both* attempts fail), so
 it is the earliest visible sign of a degrading merge provider — the same failure, one
@@ -275,7 +292,10 @@ present, `0` when healthy): a mistyped `max-pass-tokens` disables that ceiling a
   unit economics (effective $/Mtok, cost per review, cost per 100k diff chars), token mix
   (cache hit rate, the four classes stacked, output share), review and pass duration
   p50/p95, degraded passes ranked by what they burned, review rounds per PR, daemon
-  liveness, and a raw event log. The token-mix row reads empty for reviews logged before
+  liveness, and a raw event log. *Cache hit rate* divides by the event's pooled `tokens`
+  (the cached share of the billed total), **not** `cache_read / (cache_read + input)` —
+  the two answer different questions and only the first is comparable with the cost
+  panels beside it. The token-mix row reads empty for reviews logged before
   the split shipped — no query is broken, the fields simply were not emitted yet. It also asks for a **Tempo** data
   source, used only by the trace links in the two tables; leave it unset if you don't run
   [tracing](#tracing-optional) and every other panel is unaffected.

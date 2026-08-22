@@ -490,7 +490,7 @@
         "type": "loki",
         "uid": "${datasource}"
       },
-      "description": "Cached share of the tokens actually billed. Usually the biggest single lever on this bill: cache reads cost 1/5 of fresh input and 1/11 of output, so hits falling from 90% to 50% roughly triples spend with the list price untouched. A drop here explains a rising effective rate; a steady line means the rate moved for some other reason.",
+      "description": "tokens_cache_read / tokens — the cached share of the BILLED TOTAL. Deliberately not cache_read / (cache_read + input), which answers a different question and is not comparable with the cost panels beside it. Usually the biggest single lever on this bill: cache reads cost 1/5 of fresh input and 1/11 of output, so hits falling from 90% to 50% roughly triples spend with the list price untouched. A drop here explains a rising effective rate; a steady line means the rate moved for some other reason. Above 100% would mean the provider reports a cache-EXCLUSIVE total — not clamped, so that stays visible rather than hidden.",
       "fieldConfig": {
         "defaults": {
           "custom": {

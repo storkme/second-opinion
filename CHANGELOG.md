@@ -29,9 +29,11 @@ All notable changes to this project are documented here. The format follows
   provider's authoritative total wherever it gives one, and some providers fold cached
   tokens into their input count, so ratios against `tokens` are sound but deriving a
   fifth class by subtraction is not.
-- **Dashboard: a *Token mix* row** — cache hit rate, the four classes stacked, and
-  effective $/Mtok beside them, so a bill that moves can be attributed to the mix or to
-  the price instead of guessed at.
+- **Dashboard: two rows.** *Unit economics* (effective $/Mtok, cost per review, tokens
+  per review, cost per 100k diff chars) separates rate from volume; *Token mix* (cache hit
+  rate, the four classes stacked, output share) then attributes a moving rate. Read
+  together: if the mix holds steady and the rate moves, that is a reprice and nothing else
+  it could be. Both read empty for reviews logged before the split shipped.
 
 ## [1.8.2] - 2026-08-09
 

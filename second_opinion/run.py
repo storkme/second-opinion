@@ -930,6 +930,10 @@ def _chat(base_url: str, api_key: str, model: str, prompt: str, meta: dict | Non
         # The chat API reports no cache-WRITE class. A merge is one stateless call that
         # never reads back what it wrote, so 0 is the honest value, not a missing field.
         meta["tokens_cache_write"] = 0
+        # NOTE llama-server (MERGE_PROVIDER=local) omits prompt_tokens_details entirely,
+        # so cached=0 and the whole prompt is reported as fresh input even when it was
+        # served from cache. Not worth faking: a local merge costs nothing, so the class
+        # it lands in changes no bill. Read the mix panels as hosted-only.
     return content
 
 
@@ -1286,7 +1290,7 @@ def _trace_fields(trace_id: str) -> dict:
 
 
 def _token_split_fields(tokens_input: int, tokens_output: int,
-                        cache_read: int, cache_write: int) -> dict:
+                        tokens_cache_read: int, tokens_cache_write: int) -> dict:
     """The four token classes as log fields — for the pass, merge and review events alike.
 
     One helper rather than four literals at each of the three emission sites, because the
@@ -1304,9 +1308,21 @@ def _token_split_fields(tokens_input: int, tokens_output: int,
     is the cached share of what was actually billed, both numbers straight from the
     provider for the same call. What is unsound is treating the four as a partition:
     deriving one class by subtracting the others gives a number the provider never said.
+
+    `tokens` IS CACHE-INCLUSIVE, which matters because the ratio above is meaningless if
+    it isn't. The fixture in test_read_session_usage_prefers_authoritative_total_tokens
+    cannot show this — its 110 is both `input(100) + output(10)` and
+    `fresh(50) + cached(50) + output(10)`, and PR #52's review read it the second way and
+    concluded the panel could exceed 100%. Thirty days of real reviews settle it: they
+    billed $0.0369 per Mtok of `tokens`, and the CHEAPEST class here is fresh input at
+    $0.08/Mtok. A total counting only fresh input and output could not be billed at half
+    the floor price of its cheapest member; only cache reads at $0.016/Mtok get it there,
+    so they are inside the count. Should a provider ever report a cache-EXCLUSIVE total,
+    the hit-rate panel exceeding 100% is the symptom — which is why it is not clamped.
     """
     return {"tokens_input": tokens_input, "tokens_output": tokens_output,
-            "tokens_cache_read": cache_read, "tokens_cache_write": cache_write}
+            "tokens_cache_read": tokens_cache_read,
+            "tokens_cache_write": tokens_cache_write}
 
 
 def _pass_events(pr: int, sha: str, model: str, ordered: list, elapsed: dict,
