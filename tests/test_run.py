@@ -1674,13 +1674,28 @@ def test_finish_pass_carries_the_token_breakdown():
         # pins why), so the components are the provider's component counts and nothing
         # more — a panel that derives one by subtracting the others is inventing data.
         assert result.tokens == 110
-        # The DISJOINT shape pi actually sends, from the same fixture read a second way:
-        # every real local session record satisfies total == input+output+cacheRead+
-        # cacheWrite, so cache reads are inside `tokens` without being inside `input`.
-        # Both halves matter — the first makes tokens_cache_read/tokens a share, the
-        # second makes the stacked mix panel free of overlap.
-        assert 165 == (result.tokens_input + result.tokens_output
-                       + result.tokens_cache_read + result.tokens_cache_write)
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_finish_pass_reads_the_disjoint_shape_pi_actually_sends():
+    # The shape every real pi usage record has: totalTokens counts all four classes, so
+    # `input` is fresh input alone and cache reads are inside the total without being
+    # inside `input`. Both halves are load-bearing for the mix panels — the first makes
+    # tokens_cache_read/tokens a genuine share, the second keeps the stacked panel free
+    # of overlap — and until this test there was no fixture asserting either.
+    d = tempfile.mkdtemp(prefix="so-sess-disjoint-test-")
+    try:
+        with open(os.path.join(d, "pass.jsonl"), "w") as f:
+            f.write('{"message":{"usage":{"input":100,"output":10,"cacheRead":50,'
+                    '"cacheWrite":5,"totalTokens":165,"cost":{"total":0.03}}}}\n')
+        r = run._finish_pass("m", d, False, "review", "ok")
+        assert r.tokens == 165
+        assert (r.tokens_input + r.tokens_output
+                + r.tokens_cache_read + r.tokens_cache_write) == r.tokens
+        # The ratio the cache-hit panel charts, on the shape it will actually meet.
+        assert r.tokens_cache_read / r.tokens < 1
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)

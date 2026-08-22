@@ -212,16 +212,16 @@ extra detail costs no extra round trip.
 // e.g. outcome="posted". Everything else rides in the JSON line, parsed by `| json`:
 {"event": "review", "pr": 574, "sha": "…", "model": "deepseek/deepseek-v4-flash-0731",
  "provider": "openrouter", "k": 1, "pass_statuses": "ok", "passes_ok": 1,
- "passes_degraded": 0, "merged": true, "tokens": 184000, "tokens_input": 26100,
+ "passes_degraded": 0, "merged": true, "tokens": 184000, "tokens_input": 21000,
  "tokens_output": 4300, "tokens_cache_read": 158000, "tokens_cache_write": 700,
  "cost_usd": 0.031, "diff_chars": 41200, "diff_truncated": false, "duration_s": 412.3}
-// ^ the four do NOT sum to `tokens` here, and that is the realistic case, not a typo:
-// this provider folds cached tokens into its input count. See "The four token classes".
+// ^ the four sum to `tokens` here because pi reports them disjointly, which is what it
+// really does. Do not BUILD on that: nothing enforces it. See "The four token classes".
 
 // One per pass. outcome = that pass's own status, so a single selector finds every
 // timeout across every repo: {service="second-opinion", event="pass", outcome="timeout"}
 {"event": "pass", "pr": 574, "sha": "…", "k": 3, "pass": 2, "status": "timeout",
- "tokens": 912345, "tokens_input": 104000, "tokens_output": 21000,
+ "tokens": 912345, "tokens_input": 104345, "tokens_output": 21000,
  "tokens_cache_read": 780000, "tokens_cache_write": 7000,
  "cost_usd": 0.503, "chars": 0, "elapsed_s": 1800.0}
 
