@@ -5,6 +5,47 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). See the release procedure in
 [CLAUDE.md](CLAUDE.md#changelog--releases).
 
+## [Unreleased]
+
+### Fixed
+- **The rate row now excludes free local reviews too.** The token-mix row filtered on
+  provider and the money row did not, which is backwards: a `PROVIDER=local` review
+  contributes real `tokens` and `$0`, so *Effective rate*, *Cost per review* and *Cost per
+  100k diff chars* were pulled toward zero in any estate running both the Action and the
+  daemon — a price drop that never happened, the mirror of the false signal these panels
+  were built to kill. Filtered on `provider`, deliberately not the mix row's
+  `split_provider`: that field exists on nothing logged before 1.9.0, so filtering on it
+  would discard the whole history these three panels exist to show. Both sides of every
+  ratio carry the filter — *Cost per review*'s denominator is a `count_over_time` with no
+  `| json` stage, and filtering only its numerator would have been a no-op, since a free
+  review contributes `$0` to the numerator either way while still counting `+1`.
+  Both cross combos are excluded via `split_provider!="mixed"` — the reverse direction
+  (`PROVIDER=openrouter` with a local merge) is tagged `provider=openrouter` and would
+  otherwise pool the merge's free tokens into a money denominator. `!=` rather than
+  `="openrouter"` is what preserves the history: a pre-1.9.0 event has no
+  `split_provider`, compares as empty, and passes. A `PROVIDER=local` run with an
+  openrouter merge still has its real merge spend excluded — accepted, and noted in each
+  panel's description.
+- **Cost/tokens per review no longer count reviews that reported neither.** A review that
+  spent nothing — errored, skipped, or failed at checkout — emits no `tokens` or
+  `cost_usd`, so it fell out of the numerator's unwrap while still adding `+1` to the
+  `count_over_time` denominator. Both sides now require the field the panel divides by,
+  keyed on that field rather than on a list of outcomes, which would need extending every
+  time a new no-spend route is added. Degraded reviews that *did* spend still count: they
+  carry both figures, and they are real money.
+- **A cached count is no longer discarded when `prompt_tokens` is missing.** The clamp
+  added above enforces "cached cannot exceed the prompt it is part of"; with no prompt
+  reported there is no such bound, and zeroing the provider's own figure loses information
+  rather than avoiding invention.
+- **A malformed usage envelope can no longer fabricate merge tokens.** `cached_tokens` is
+  clamped to `prompt_tokens` rather than only flooring the subtraction at zero. With
+  `prompt_tokens: 10, cached_tokens: 99` the components fallback added to 100 for a call
+  the provider priced at 11 — inventing 89 tokens, which is precisely what the token-split
+  docs forbid everywhere else.
+- `providers.py` claimed the default model was GLM 5.2; it has been
+  `deepseek/deepseek-v4-flash-0731` since 1.0. That comment is the one an operator reads
+  when deciding whether to flip `pi-reasoning`.
+
 ## [1.9.0] - 2026-08-22
 
 ### Added

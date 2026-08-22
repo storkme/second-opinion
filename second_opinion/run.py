@@ -923,9 +923,26 @@ def _chat(base_url: str, api_key: str, model: str, prompt: str, meta: dict | Non
         ptd = usage.get("prompt_tokens_details") or {}
         if not isinstance(ptd, dict):
             ptd = {}
+        # CLAMPED to the prompt, not merely floored at zero after subtracting. An
+        # envelope claiming more cached tokens than prompt tokens is malformed, and
+        # taking its cached count at face value would make the components fallback below
+        # exceed the prompt+completion the provider actually reported — fabricating
+        # tokens out of a bad response, which is the one thing this module refuses to do
+        # anywhere else (see _token_split_fields on not deriving classes by arithmetic).
+        # prompt_tokens, not `prompt` — that name is this function's parameter, holding
+        # the actual prompt STRING, and rebinding it to an int here would be safe only
+        # for as long as nobody adds a use of it below.
+        prompt_tokens = _int_or_zero(usage.get("prompt_tokens"))
         cached = _int_or_zero(ptd.get("cached_tokens"))
+        # Clamp only when there IS a prompt to clamp against. The constraint being
+        # enforced is "the cached part cannot exceed the prompt it is part of"; with
+        # prompt_tokens absent no such bound exists, and zeroing a count the provider did
+        # report would discard real information rather than avoid inventing any — the
+        # opposite of what the clamp is for.
+        if prompt_tokens:
+            cached = min(cached, prompt_tokens)
         meta["tokens_cache_read"] = cached
-        meta["tokens_input"] = max(0, _int_or_zero(usage.get("prompt_tokens")) - cached)
+        meta["tokens_input"] = max(0, prompt_tokens - cached)
         meta["tokens_output"] = _int_or_zero(usage.get("completion_tokens"))
         # The chat API reports no cache-WRITE class. A merge is one stateless call that
         # never reads back what it wrote, so 0 is the honest value, not a missing field.
