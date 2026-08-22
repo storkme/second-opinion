@@ -212,18 +212,24 @@ extra detail costs no extra round trip.
 // e.g. outcome="posted". Everything else rides in the JSON line, parsed by `| json`:
 {"event": "review", "pr": 574, "sha": "…", "model": "deepseek/deepseek-v4-flash-0731",
  "provider": "openrouter", "k": 1, "pass_statuses": "ok", "passes_ok": 1,
- "passes_degraded": 0, "merged": true, "tokens": 184000, "cost_usd": 0.031,
- "diff_chars": 41200, "diff_truncated": false, "duration_s": 412.3}
+ "passes_degraded": 0, "merged": true, "tokens": 184000, "tokens_input": 21000,
+ "tokens_output": 4300, "tokens_cache_read": 158000, "tokens_cache_write": 700,
+ "cost_usd": 0.031, "diff_chars": 41200, "diff_truncated": false, "duration_s": 412.3}
+// ^ the four sum to `tokens` here because pi reports them disjointly, which is what it
+// really does. Do not BUILD on that: nothing enforces it. See "The four token classes".
 
 // One per pass. outcome = that pass's own status, so a single selector finds every
 // timeout across every repo: {service="second-opinion", event="pass", outcome="timeout"}
 {"event": "pass", "pr": 574, "sha": "…", "k": 3, "pass": 2, "status": "timeout",
- "tokens": 912345, "cost_usd": 0.503, "chars": 0, "elapsed_s": 1800.0}
+ "tokens": 912345, "tokens_input": 104345, "tokens_output": 21000,
+ "tokens_cache_read": 780000, "tokens_cache_write": 7000,
+ "cost_usd": 0.503, "chars": 0, "elapsed_s": 1800.0}
 
 // The K>1 merge. outcome = merged | merged_on_retry | fallback.
 {"event": "merge", "pr": 574, "sha": "…", "provider": "openrouter", "merged": false,
  "attempts": 2, "failures": "raised RuntimeError: 402 …; returned no usable content",
- "tokens": 21000, "cost_usd": 0.011}
+ "tokens": 21000, "tokens_input": 4000, "tokens_output": 900,
+ "tokens_cache_read": 16100, "tokens_cache_write": 0, "cost_usd": 0.011}
 ```
 
 The `review` event's `pass_statuses` says *which* pass died; the `pass` event says what
@@ -233,6 +239,67 @@ are pooled, so a pass that failed instantly and one that burned 12.6M tokens fir
 `sum(pass.tokens) ≤ review.tokens`: the difference is the `K>1` merge call, which is not
 a pass. At `K=1` a pass event is still worth having — `elapsed_s` is model time alone,
 while the review's `duration_s` also covers diff fetch, worktree setup and posting.
+
+### The four token classes
+
+Every spending event carries `tokens_input` / `tokens_output` / `tokens_cache_read` /
+`tokens_cache_write` beside the pooled `tokens`, because they bill an order of magnitude
+apart — for `deepseek-v4-flash-0731`, **$0.08 / $0.18 / $0.016** per Mtok for fresh input,
+output and cache reads. Pooled, `cost_usd / tokens` is a blend of price *and* mix: a
+provider reprice and a collapse in cache hits move it the same way by a similar amount,
+and no query can separate them. Split, `tokens_cache_read / tokens` charts the cache hit
+rate directly, which is usually the larger lever on the bill — hits falling from 90% to
+50% roughly triples spend with the list price untouched.
+
+**They are not a partition and must not be treated as one.** `tokens` is the provider's
+own authoritative total wherever it reports one (pi prefers its per-message `totalTokens`
+over the components), and some providers already fold cached tokens into their input
+count, so the four need not sum to it. Ratios against `tokens` are sound; deriving a
+fifth class by subtracting the other four is not — that number came from arithmetic, not
+from the provider. The merge call is the one case made deliberately disjoint, by
+subtracting `prompt_tokens_details.cached_tokens` out of `prompt_tokens` in `_chat`.
+
+**What pi actually sends, measured:** every real pi usage record carrying a `cacheRead`
+satisfies `totalTokens == input + output + cacheRead + cacheWrite` exactly. The four are
+**disjoint**, and `input` is fresh input alone. Two things follow, and the mix panels need
+both: cache reads are *inside* `tokens` (so `tokens_cache_read / tokens` is a genuine
+share), and they are *not* inside `input` (so the stacked mix panel has no overlap).
+The billing agrees independently — thirty days of reviews cost **$0.0369 per Mtok** of
+`tokens`, under the $0.08/Mtok floor for fresh input, which only cache reads at
+$0.016/Mtok can explain.
+
+Say it out loud because the unit test pinning pi's authoritative total is a *synthetic*
+folding provider, written to prove `totalTokens` beats the component sum — not a sample of
+what pi sends. Read as canonical it implies cache reads are outside `tokens`, or that they
+are inside `input`; two separate reviews of the PR that added this took one horn each, and
+both were wrong. So the four do sum to `tokens` today, but nothing enforces it: a genuinely
+folding provider would break the identity, and its numbers pass through unaltered rather
+than being "corrected" into figures it never sent. If a provider ever reports a
+cache-exclusive total, the hit-rate panel climbing past 100% is the symptom — deliberately
+not clamped, so it stays visible.
+
+`local` (llama-server) reports no cached count at all — for the merge *and* for the review
+passes — so anything it touched has a structurally-zero cache numerator over a real
+denominator, reading as 0% cache: exactly the total-cache-failure symptom the panel exists
+to raise. It also costs nothing, so it has no place in a row about money.
+
+The mix row therefore filters on **`split_provider`**, a field on the review event, and
+not on `provider`. The distinction is load-bearing because `provider` names who ran the
+*passes* while the split also pools the *merge*, and `MERGE_PROVIDER` is set
+independently:
+
+| `PROVIDER` | `MERGE_PROVIDER` | `provider` | `split_provider` |
+|---|---|---|---|
+| openrouter | openrouter | `openrouter` | `openrouter` — charted |
+| local | openrouter | `local` | `local` — excluded |
+| **openrouter** | **local** | **`openrouter`** | **`mixed` — excluded** |
+
+That third row is the one a `provider` filter would have admitted: an openrouter-tagged
+review whose local merge filed its whole prompt as fresh input, pulling the hit rate down
+and reading as a cache regression that never happened. `split_provider` is `"mixed"` only
+when a merge actually **ran** under a different provider — at `K=1` none does, so such a
+run is charted normally however `MERGE_PROVIDER` is set. A local-only estate sees the row
+empty, which is the honest answer.
 
 `outcome="merged_on_retry"` is the merge signal worth alerting on: a merge that fails once
 and recovers annotates nothing in CI (the warning fires only when *both* attempts fail), so
@@ -249,8 +316,18 @@ present, `0` when healthy): a mistyped `max-pass-tokens` disables that ceiling a
   needs only the URL.
 - **Dashboard:** import [`examples/grafana-dashboard.json`](examples/grafana-dashboard.json)
   and point it at your Loki data source — reviews by outcome, cost/tokens per repo,
-  review and pass duration p50/p95, degraded passes ranked by what they burned, review
-  rounds per PR, daemon liveness, and a raw event log. It also asks for a **Tempo** data
+  unit economics (effective $/Mtok, cost per review, cost per 100k diff chars), token mix
+  (cache hit rate, the four classes stacked, output share), review and pass duration
+  p50/p95, degraded passes ranked by what they burned, review rounds per PR, daemon
+  liveness, and a raw event log. *Cache hit rate* divides by the event's pooled `tokens`
+  (the cached share of the billed total), **not** `cache_read / (cache_read + input)` —
+  the two answer different questions and only the first is comparable with the cost
+  panels beside it. Every token-mix query carries a `|= "tokens_cache_read"` line filter so
+  both sides of each ratio see the same population: without it a window spanning the
+  release would keep pre-split events in the denominator while `__error__=""` dropped them
+  from the numerator, diluting the ratio toward zero — which looks exactly like the cache
+  regression the panel exists to catch. With it the row simply reads empty before the
+  split shipped, which is the honest answer. It also asks for a **Tempo** data
   source, used only by the trace links in the two tables; leave it unset if you don't run
   [tracing](#tracing-optional) and every other panel is unaffected.
 - **Contract:** off by default (no `LOKI_URL` = no network call, so `PROVIDER=local`

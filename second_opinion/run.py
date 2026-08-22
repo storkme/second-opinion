@@ -326,6 +326,15 @@ class PassResult(NamedTuple):
     status: str
     cost: float = 0.0
     tokens: int = 0
+    # The four classes `tokens` pools. Separate because they bill at wildly different
+    # rates (deepseek-v4-flash-0731: $0.08 fresh input, $0.18 output, $0.016 cache read,
+    # per Mtok), which makes the pooled figure's $/token as much a function of the MIX as
+    # of the price — a cache regression and a provider reprice move it identically and by
+    # a similar amount. Split, they are distinguishable; pooled, they never will be.
+    tokens_input: int = 0
+    tokens_output: int = 0
+    tokens_cache_read: int = 0
+    tokens_cache_write: int = 0
     # Inner timeline (model turns + tool calls) reconstructed from the pi transcript,
     # for tracing only. A tuple, not a list, because PassResult is a NamedTuple and a
     # mutable default would be shared across every pass ever constructed.
@@ -578,7 +587,14 @@ def _finish_pass(model: str, session_dir: str, internal: bool, text: str, status
         # pi may not price a custom OpenRouter model (cost.total is 0); fall back to a
         # list-price estimate from real token counts.
         cost = _cost_from_usage(model, usage)
-    return PassResult(text, status, cost=cost, tokens=tokens, timeline=timeline)
+    # _read_session_usage separates these already (and _cost_from_usage prices them
+    # individually); this return was the only place they were dropped.
+    return PassResult(text, status, cost=cost, tokens=tokens,
+                      tokens_input=usage.get("input", 0),
+                      tokens_output=usage.get("output", 0),
+                      tokens_cache_read=usage.get("cache_read", 0),
+                      tokens_cache_write=usage.get("cache_write", 0),
+                      timeline=timeline)
 
 
 class _UsageTail:
@@ -899,6 +915,36 @@ def _chat(base_url: str, api_key: str, model: str, prompt: str, meta: dict | Non
         if not isinstance(ctd, dict):
             ctd = {}
         meta["reasoning_tokens"] = _int_or_zero(ctd.get("reasoning_tokens"))
+        # OpenAI-shaped usage, NOT pi's: `prompt_tokens` counts the whole prompt with
+        # the cached part INCLUDED. Subtract it, or the same tokens land in two classes
+        # at once and every per-class chart double-counts exactly the cache hits it
+        # exists to measure. max(0, ...) because the subtraction spans two independently
+        # reported fields and a malformed response must not yield a negative count.
+        ptd = usage.get("prompt_tokens_details") or {}
+        if not isinstance(ptd, dict):
+            ptd = {}
+        cached = _int_or_zero(ptd.get("cached_tokens"))
+        meta["tokens_cache_read"] = cached
+        meta["tokens_input"] = max(0, _int_or_zero(usage.get("prompt_tokens")) - cached)
+        meta["tokens_output"] = _int_or_zero(usage.get("completion_tokens"))
+        # The chat API reports no cache-WRITE class. A merge is one stateless call that
+        # never reads back what it wrote, so 0 is the honest value, not a missing field.
+        meta["tokens_cache_write"] = 0
+        # An envelope can carry components but no authoritative total. Before the split
+        # that only meant `tokens: 0`; now it would mean a zero total sitting beside
+        # non-zero classes, which reads as data loss and breaks any ratio taken against
+        # it. Falling back to the components mirrors what _accumulate_usage already does
+        # on the pi side when totalTokens is absent — and the classes here ARE disjoint
+        # (the subtraction above guarantees it), so the sum is the total, not a guess.
+        if not meta["tokens"]:
+            meta["tokens"] = (meta["tokens_input"] + meta["tokens_output"]
+                              + meta["tokens_cache_read"])
+        # NOTE llama-server (MERGE_PROVIDER=local) omits prompt_tokens_details entirely,
+        # so cached=0 and the whole prompt is reported as fresh input even when it was
+        # served from cache. Not worth faking: a local merge costs nothing, so the class
+        # it lands in changes no bill. It does however make an openrouter-reviewed run's
+        # split a blend of two accountings, which is what _split_provider exists to let
+        # the mix panels exclude.
     return content
 
 
@@ -1254,6 +1300,65 @@ def _trace_fields(trace_id: str) -> dict:
     return {"trace_id": trace_id} if trace_id else {}
 
 
+def _split_provider(merge_ran: bool) -> str:
+    """Whose accounting the review event's four token classes actually came from.
+
+    `provider` on a review event is PROVIDER — who ran the passes — but the split pools
+    the passes AND the merge, and MERGE_PROVIDER is independently configurable. So on a
+    cross combo the classes are a blend of two shapes, and only one of them reports
+    caching: llama-server sends no cached count, so its whole prompt is filed as fresh
+    input. A mix panel filtering on `provider` alone would admit an
+    openrouter-reviewed/local-merged run and read its inflated fresh input and missing
+    cache reads as a cache regression — the exact false signal the row exists to raise.
+
+    Hence a field the panels can filter on that answers the question they actually ask:
+    were ALL of these tokens accounted for the same way? "mixed" when the merge ran under
+    a different provider, otherwise PROVIDER. Keyed on whether a merge RAN, not on the
+    config, because at K=1 none does and the split is purely PROVIDER's however
+    MERGE_PROVIDER is set.
+    """
+    return "mixed" if merge_ran and MERGE_PROVIDER != PROVIDER else PROVIDER
+
+
+def _token_split_fields(tokens_input: int, tokens_output: int,
+                        tokens_cache_read: int, tokens_cache_write: int) -> dict:
+    """The four token classes as log fields — for the pass, merge and review events alike.
+
+    One helper rather than four literals at each of the three emission sites, because the
+    panels that matter divide ONE event's field by ANOTHER'S (cache hit rate is
+    `tokens_cache_read / tokens`), so a name that drifts on a single site does not break
+    loudly — it silently returns no data for that slice while the others keep charting.
+
+    THESE DO NOT RELIABLY SUM TO `tokens`, and no panel may assume they do. `tokens` is
+    the provider's own authoritative total where it reports one (pi prefers `totalTokens`
+    over the components — see _accumulate_usage and the test pinning 110 against
+    components of 160), and some providers already fold cached tokens into their input
+    count. Only the merge call's split is made disjoint here, by subtraction in _chat.
+
+    A ratio against `tokens` is still the right question — `tokens_cache_read / tokens`
+    is the cached share of what was actually billed, both numbers straight from the
+    provider for the same call. What is unsound is treating the four as a partition:
+    deriving one class by subtracting the others gives a number the provider never said.
+
+    What pi actually sends is disjoint — `totalTokens == input + output + cacheRead +
+    cacheWrite` on every real usage record, so cache reads are inside `tokens` without
+    being inside `input`. The mix panels need both halves of that: the first makes
+    `tokens_cache_read / tokens` a share, the second keeps the stacked panel free of
+    overlap. Measured, not assumed, and the evidence plus the folding-provider case that
+    keeps being mistaken for it live where that confusion starts — see the fixtures in
+    test_read_session_usage_prefers_authoritative_total_tokens and
+    test_finish_pass_leaves_a_folding_providers_numbers_alone.
+
+    So the four do sum to `tokens` today, and nothing ENFORCES it: totalTokens is taken
+    verbatim, and a folding provider would break the identity. Hence no normalisation on
+    the way in and no panel deriving a class by subtracting the others — a number the
+    provider never sent is worse than one that does not add up.
+    """
+    return {"tokens_input": tokens_input, "tokens_output": tokens_output,
+            "tokens_cache_read": tokens_cache_read,
+            "tokens_cache_write": tokens_cache_write}
+
+
 def _pass_events(pr: int, sha: str, model: str, ordered: list, elapsed: dict,
                  trace_id: str = "") -> list:
     """One monitoring event per agentic pass, as (event, labels, fields) triples for
@@ -1282,6 +1387,8 @@ def _pass_events(pr: int, sha: str, model: str, ordered: list, elapsed: dict,
              {"repo": REPO, "outcome": r.status},
              {"pr": pr, "sha": sha, "model": model, "provider": PROVIDER, "k": K,
               "pass": i + 1, "status": r.status, "tokens": r.tokens,
+              **_token_split_fields(r.tokens_input, r.tokens_output,
+                                    r.tokens_cache_read, r.tokens_cache_write),
               "cost_usd": round(r.cost, 6), "chars": len(r.text),
               "elapsed_s": round(elapsed.get(i, 0.0), 1),
               # Same trace as the review event: a degraded pass is the row you most want
@@ -1321,7 +1428,11 @@ def _merge_event(pr: int, sha: str, merge_model: str, mm: dict, trace_id: str = 
              # Joined, not a list: keeps the line flat for `| json`, which does not
              # promote array elements into queryable fields.
              "failures": "; ".join(failures)[:300],
-             "tokens": mm.get("tokens", 0), "cost_usd": round(mm.get("cost", 0.0), 6),
+             "tokens": mm.get("tokens", 0),
+             **_token_split_fields(mm.get("tokens_input", 0), mm.get("tokens_output", 0),
+                                   mm.get("tokens_cache_read", 0),
+                                   mm.get("tokens_cache_write", 0)),
+             "cost_usd": round(mm.get("cost", 0.0), 6),
              **_trace_fields(trace_id)})
 
 
@@ -1408,6 +1519,10 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
     degraded = False
     total_cost = 0.0
     total_tokens = 0
+    # Accumulated in lockstep with total_tokens, from exactly the same two places, so the
+    # review event's split and its pooled total can never disagree about which calls they
+    # counted — the degraded path emits before the merge is added to either.
+    split = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
     try:
         # Inside the try: log()/_annotate() print, and a BrokenPipeError here
         # would otherwise escape review_pr with the worktree still on disk.
@@ -1467,6 +1582,10 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         for i, result in enumerate(ordered):
             total_cost += result.cost
             total_tokens += result.tokens
+            split["input"] += result.tokens_input
+            split["output"] += result.tokens_output
+            split["cache_read"] += result.tokens_cache_read
+            split["cache_write"] += result.tokens_cache_write
             log(f"#{pr}: pass {i+1}/{K} — {len(result.text)}c · "
                 f"{result.tokens:,} tok · ${result.cost:.4f} in {elapsed.get(i, 0):.0f}s")
             if result.status in DEGRADED:
@@ -1492,7 +1611,11 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
                     "pr": pr, "sha": sha, "model": model, "provider": PROVIDER,
                     "reason": "no_output", "k": K,
                     "pass_statuses": ",".join(r.status for r in ordered),
-                    "tokens": total_tokens, "cost_usd": round(total_cost, 6),
+                    "tokens": total_tokens,
+                    **_token_split_fields(split["input"], split["output"],
+                                          split["cache_read"], split["cache_write"]),
+                    "split_provider": _split_provider(False),
+                    "cost_usd": round(total_cost, 6),
                     "duration_s": round(time.monotonic() - t0, 1),
                     **_trace_fields(trace_id)}),
                 *_pass_events(pr, sha, model, ordered, elapsed, trace_id)])
@@ -1515,6 +1638,10 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
         mm["end_ns"] = time.time_ns()
         total_cost += mm.get("cost", 0.0)
         total_tokens += mm.get("tokens", 0)
+        split["input"] += mm.get("tokens_input", 0)
+        split["output"] += mm.get("tokens_output", 0)
+        split["cache_read"] += mm.get("tokens_cache_read", 0)
+        split["cache_write"] += mm.get("tokens_cache_write", 0)
         merged = mm.get("merged", True)
     if k == 1:
         pass_label = "single pass"
@@ -1579,6 +1706,9 @@ def review_pr(pr: int, title: str, sha: str, model: str, merge_model: str, dry_r
                 "passes_ok": sum(r.status == "ok" for r in ordered),
                 "passes_degraded": sum(r.status in DEGRADED for r in ordered),
                 "merged": merged, "tokens": total_tokens,
+                **_token_split_fields(split["input"], split["output"],
+                                      split["cache_read"], split["cache_write"]),
+                "split_provider": _split_provider(mm is not None),
                 "cost_usd": round(total_cost, 6),
                 "diff_chars": len(filtered), "diff_truncated": fd.truncated,
                 "duration_s": round(time.monotonic() - t0, 1),

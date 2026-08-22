@@ -1492,6 +1492,53 @@ def test_chat_captures_usage_cost_in_meta():
     assert meta["reasoning_tokens"] == 55
 
 
+def test_chat_takes_the_cached_part_out_of_the_prompt_count():
+    # The chat API counts cached tokens INSIDE prompt_tokens; pi reports them alongside
+    # input. Without the subtraction the same 800 tokens are billed to two classes and
+    # the cache-hit panel — the whole point of splitting — reads high by its own numerator.
+    run.requests.post = lambda *a, **k: _Resp({
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 20, "total_tokens": 1020,
+                  "prompt_tokens_details": {"cached_tokens": 800}},
+    })
+    meta = {}
+    run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
+    assert meta["tokens_cache_read"] == 800
+    assert meta["tokens_input"] == 200, "fresh input is prompt minus the cached part"
+    assert meta["tokens_output"] == 20
+    # A merge is one stateless call: it writes no cache entry it then reads back.
+    assert meta["tokens_cache_write"] == 0
+
+
+def test_chat_falls_back_to_the_components_when_the_total_is_missing():
+    # A zero `tokens` beside non-zero classes reads as data loss, and every ratio taken
+    # against it is wrong. The merge's classes are disjoint by construction (the cached
+    # part is subtracted out of prompt_tokens), so summing them IS the total here.
+    run.requests.post = lambda *a, **k: _Resp({
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 20,
+                  "prompt_tokens_details": {"cached_tokens": 800}},
+    })
+    meta = {}
+    run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
+    assert meta["tokens"] == 1020, "200 fresh + 20 out + 800 cached"
+    assert (meta["tokens_input"] + meta["tokens_output"]
+            + meta["tokens_cache_read"]) == meta["tokens"]
+
+
+def test_chat_never_reports_negative_input_when_cached_exceeds_prompt():
+    # Two independently reported fields, so the subtraction can invert on a malformed
+    # response. A negative token count would poison any sum it landed in.
+    run.requests.post = lambda *a, **k: _Resp({
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 1,
+                  "prompt_tokens_details": {"cached_tokens": 99}},
+    })
+    meta = {}
+    run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
+    assert meta["tokens_input"] == 0
+
+
 def test_chat_keeps_valid_content_when_usage_metadata_is_malformed():
     run.requests.post = lambda *a, **k: _Resp({
         "choices": [{"message": {"content": "usable review"}}],
@@ -1501,7 +1548,9 @@ def test_chat_keeps_valid_content_when_usage_metadata_is_malformed():
     meta = {}
     out = run._chat(run.OPENROUTER_BASE, "k", "m", "p", meta)
     assert out == "usable review"
-    assert meta == {"cost": 0.0, "tokens": 0, "reasoning_tokens": 0}
+    assert meta == {"cost": 0.0, "tokens": 0, "reasoning_tokens": 0,
+                    "tokens_input": 0, "tokens_output": 0,
+                    "tokens_cache_read": 0, "tokens_cache_write": 0}
 
 
 def test_failure_notice_includes_run_url():
@@ -1601,8 +1650,16 @@ def test_read_session_usage_prefers_authoritative_total_tokens():
     d = tempfile.mkdtemp(prefix="so-sess-total-test-")
     try:
         with open(os.path.join(d, "pass.jsonl"), "w") as f:
-            # Some providers include cached tokens in input already. Summing components would
-            # report 160, but pi's authoritative total for the message is 110.
+            # A SYNTHETIC folding provider — one that includes cached tokens in its input
+            # count already. Summing components would report 160, but the authoritative
+            # total for the message is 110, and this pins that the total wins.
+            #
+            # NOT a sample of what pi sends. Real pi usage records are disjoint
+            # (totalTokens == input + output + cacheRead + cacheWrite; verified across
+            # every local session record carrying a cacheRead), and the sibling test
+            # below pins that shape. Reading this fixture as canonical is what led two
+            # separate reviews of the token-split PR to opposite wrong conclusions —
+            # that cache reads sit outside `tokens`, and that they sit inside `input`.
             f.write('{"message":{"usage":{"input":100,"output":10,"cacheRead":50,'
                     '"cacheWrite":0,"totalTokens":110,"cost":{"total":0.03}}}}\n')
         usage = run._read_session_usage(d)
@@ -1613,6 +1670,78 @@ def test_read_session_usage_prefers_authoritative_total_tokens():
         import shutil
         shutil.rmtree(d, ignore_errors=True)
 
+
+
+def test_finish_pass_carries_the_token_breakdown():
+    # The four classes bill at rates an order of magnitude apart, so a pooled total
+    # cannot distinguish a price change from a cache regression. This is the read that
+    # used to be thrown away one line before the PassResult was built.
+    d = tempfile.mkdtemp(prefix="so-sess-split-test-")
+    try:
+        with open(os.path.join(d, "pass.jsonl"), "w") as f:
+            f.write('{"message":{"usage":{"input":100,"output":10,"cacheRead":50,'
+                    '"cacheWrite":5,"totalTokens":110,"cost":{"total":0.03}}}}\n')
+        result = run._finish_pass("m", d, False, "review", "ok")
+        assert result.tokens_input == 100
+        assert result.tokens_output == 10
+        assert result.tokens_cache_read == 50
+        assert result.tokens_cache_write == 5
+        # Deliberately NOT 165. pi's authoritative totalTokens wins (the sibling test
+        # pins why), so the components are the provider's component counts and nothing
+        # more — a panel that derives one by subtracting the others is inventing data.
+        assert result.tokens == 110
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_finish_pass_reads_the_disjoint_shape_pi_actually_sends():
+    # The shape every real pi usage record has: totalTokens counts all four classes, so
+    # `input` is fresh input alone and cache reads are inside the total without being
+    # inside `input`. Both halves are load-bearing for the mix panels — the first makes
+    # tokens_cache_read/tokens a genuine share, the second keeps the stacked panel free
+    # of overlap — and until this test there was no fixture asserting either.
+    d = tempfile.mkdtemp(prefix="so-sess-disjoint-test-")
+    try:
+        with open(os.path.join(d, "pass.jsonl"), "w") as f:
+            f.write('{"message":{"usage":{"input":100,"output":10,"cacheRead":50,'
+                    '"cacheWrite":5,"totalTokens":165,"cost":{"total":0.03}}}}\n')
+        r = run._finish_pass("m", d, False, "review", "ok")
+        assert r.tokens == 165
+        assert (r.tokens_input + r.tokens_output
+                + r.tokens_cache_read + r.tokens_cache_write) == r.tokens
+        # The ratio the cache-hit panel charts, on the shape it will actually meet.
+        assert r.tokens_cache_read / r.tokens < 1
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_finish_pass_leaves_a_folding_providers_numbers_alone():
+    # The deliberate non-normalisation. This provider folds its 50 cached tokens into
+    # input, so the components overshoot the authoritative total (160 vs 110) — and the
+    # split is still emitted exactly as reported, not "corrected" by subtracting cacheRead
+    # from input the way _chat does for the OpenAI-shaped merge usage.
+    #
+    # That asymmetry is the point: _chat KNOWS its shape folds, because the chat API
+    # documents prompt_tokens as cache-inclusive. Here the shape varies by provider and
+    # nothing in the record says which one this is, so inventing a fresh-input figure
+    # would put a number in the metrics that no provider ever sent. A stat that does not
+    # add up is diagnosable; a fabricated one is not.
+    d = tempfile.mkdtemp(prefix="so-sess-folding-test-")
+    try:
+        with open(os.path.join(d, "pass.jsonl"), "w") as f:
+            f.write('{"message":{"usage":{"input":100,"output":10,"cacheRead":50,'
+                    '"cacheWrite":0,"totalTokens":110,"cost":{"total":0.03}}}}\n')
+        result = run._finish_pass("m", d, False, "review", "ok")
+        assert result.tokens_input == 100, "reported as-is, not 100-50"
+        assert result.tokens_cache_read == 50
+        assert result.tokens == 110
+        assert (result.tokens_input + result.tokens_output
+                + result.tokens_cache_read + result.tokens_cache_write) == 160
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_run_pass_uses_provided_session_dir():
@@ -1823,6 +1952,151 @@ def test_review_pr_emits_one_pass_event_per_pass_with_its_own_spend():
     finally:
         run.K, run.run_pass, run.PROVIDER = real
         run.merge_reviews = real_merge
+        _restore_review_pr_deps(real_deps)
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_event_token_split_covers_the_passes_and_the_merge():
+    # The review event pools spend across K passes plus the merge call. Its split has to
+    # cover exactly the same calls, or the cache-hit ratio charted from it describes a
+    # different review than the cost beside it. Every number here is distinct so any
+    # dropped or double-counted contributor changes a total.
+    real = (run.K, run.run_pass, run.PROVIDER)
+    run.K, run.PROVIDER = 2, "local"  # local => sequential, deterministic pass order
+    real_deps = _stub_review_pr_deps()
+    results = iter([
+        run.PassResult("finding one", "ok", cost=0.01, tokens=1000,
+                       tokens_input=100, tokens_output=20,
+                       tokens_cache_read=800, tokens_cache_write=80),
+        run.PassResult("finding two", "ok", cost=0.02, tokens=2000,
+                       tokens_input=200, tokens_output=40,
+                       tokens_cache_read=1600, tokens_cache_write=160)])
+    run.run_pass = lambda wt, m, s, u, session_dir=None: next(results)
+    real_merge = run.merge_reviews
+
+    def fake_merge(pr, title, passes, model, meta=None):
+        if meta is not None:
+            meta.update({"cost": 0.05, "tokens": 300, "merged": True, "attempts": 1,
+                         "tokens_input": 30, "tokens_output": 6,
+                         "tokens_cache_read": 240, "tokens_cache_write": 24})
+        return "merged body"
+
+    run.merge_reviews = fake_merge
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = run.review_pr(11, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert out.posted is True
+        review = [f for e, _l, f in events if e == "review"]
+        assert len(review) == 1, events
+        f = review[0]
+        # 100 + 200 passes + 30 merge, and so on for each class.
+        assert f["tokens_input"] == 330
+        assert f["tokens_output"] == 66
+        assert f["tokens_cache_read"] == 2640
+        assert f["tokens_cache_write"] == 264
+        # Same contributors as the pooled figures beside them: 1000 + 2000 + 300.
+        assert f["tokens"] == 3300
+        assert f["cost_usd"] == 0.08
+        # The merge is a call of its own and carries its own split, so "what did merging
+        # cost" stays answerable without subtracting the passes from the review.
+        merge = [mf for e, _l, mf in events if e == "merge"]
+        assert len(merge) == 1
+        assert merge[0]["tokens_cache_read"] == 240 and merge[0]["tokens_input"] == 30
+    finally:
+        run.K, run.run_pass, run.PROVIDER = real
+        run.merge_reviews = real_merge
+        _restore_review_pr_deps(real_deps)
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_review_event_flags_a_split_blended_across_two_providers():
+    # The leaking cross combo: openrouter passes, local merge. The review event is tagged
+    # provider="openrouter" (who ran the passes) while its split also carries the local
+    # merge's classes — and llama-server reports no cached count, so that merge's whole
+    # prompt lands in fresh input. A mix panel filtering on `provider` alone would admit
+    # this run and read the inflated input and missing cache reads as a cache regression.
+    real = (run.K, run.run_pass, run.PROVIDER, run.MERGE_PROVIDER)
+    run.K, run.PROVIDER, run.MERGE_PROVIDER = 2, "openrouter", "local"
+    real_deps = _stub_review_pr_deps()
+    # A fixed result, not an iterator: openrouter runs passes concurrently.
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult(
+        "finding", "ok", cost=0.01, tokens=1000, tokens_input=100,
+        tokens_output=20, tokens_cache_read=800, tokens_cache_write=80)
+    real_merge = run.merge_reviews
+
+    def fake_merge(pr, title, passes, model, meta=None):
+        if meta is not None:
+            # The local shape: everything filed as fresh input, no cached count at all.
+            meta.update({"cost": 0.0, "tokens": 300, "merged": True, "attempts": 1,
+                         "tokens_input": 300, "tokens_output": 0,
+                         "tokens_cache_read": 0, "tokens_cache_write": 0})
+        return "merged body"
+
+    run.merge_reviews = fake_merge
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(13, "t", "cafebabe00", "m", "m", dry_run=False)
+        review = [f for e, _l, f in events if e == "review"]
+        assert len(review) == 1, events
+        assert review[0]["provider"] == "openrouter", "still tagged by who ran the passes"
+        assert review[0]["split_provider"] == "mixed", \
+            "the split pools two accountings, and the mix panels must be able to skip it"
+        # The local merge's prompt really did land in fresh input — the thing that would
+        # have been misread as a cache regression.
+        assert review[0]["tokens_input"] == 500
+
+        # Same providers => not mixed, so the ordinary hosted run is still charted.
+        run.MERGE_PROVIDER = "openrouter"
+        events.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(14, "t", "cafebabe00", "m", "m", dry_run=False)
+        assert [f for e, _l, f in events
+                if e == "review"][0]["split_provider"] == "openrouter"
+    finally:
+        run.K, run.run_pass, run.PROVIDER, run.MERGE_PROVIDER = real
+        run.merge_reviews = real_merge
+        _restore_review_pr_deps(real_deps)
+        real_emit()
+        run._annotate = _REAL_ANNOTATE
+
+
+def test_degraded_review_event_carries_the_split_of_what_it_burned():
+    # An all-passes-failed review is where the split matters most: the review event is
+    # the only record of the spend, and "2M cache reads" and "2M fresh input" are the
+    # same pooled number at 5x the price.
+    real = (run.K, run.run_pass)
+    run.K = 1
+    real_deps = _stub_review_pr_deps()
+    run.run_pass = lambda wt, m, s, u, session_dir=None: run.PassResult(
+        "", "timeout", cost=0.40, tokens=900_000,
+        tokens_input=500_000, tokens_output=0,
+        tokens_cache_read=400_000, tokens_cache_write=0)
+    events, real_emit = _capture_metrics()
+    _capture_annotations()
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.review_pr(12, "t", "cafebabe00", "m", "m", dry_run=False)
+        review = [(labels, f) for e, labels, f in events if e == "review"]
+        assert len(review) == 1, events
+        labels, f = review[0]
+        assert labels["outcome"] == "degraded"
+        assert f["tokens_input"] == 500_000
+        assert f["tokens_cache_read"] == 400_000
+        assert f["tokens"] == 900_000
+    finally:
+        run.K, run.run_pass = real
         _restore_review_pr_deps(real_deps)
         real_emit()
         run._annotate = _REAL_ANNOTATE
